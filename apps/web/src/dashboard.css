@@ -1,0 +1,307 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   LumixPay App Shell — Sidebar layout
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* ── Shell ─────────────────────────────────────────────────────────────────── */
+.app-shell {
+  display: flex;
+  min-height: 100dvh;
+  background: var(--bg);
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────────────── */
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: width 0.22s cubic-bezier(0.4,0,0.2,1);
+  z-index: 100;
+}
+.sidebar.collapsed {
+  width: 60px;
+}
+
+/* ── Sidebar header ─────────────────────────────────────────────────────────── */
+.sb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 14px;
+  border-bottom: 1px solid var(--border);
+  min-height: 60px;
+  gap: 8px;
+}
+.sb-logo {
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  opacity: 1;
+  transition: opacity 0.2s, width 0.2s;
+  flex-shrink: 0;
+}
+.sb-logo-img {
+  height: 32px;
+  width: auto;
+  object-fit: contain;
+  filter: brightness(1.08) drop-shadow(0 1px 6px rgba(124,58,237,.28));
+  transition: filter 0.2s;
+  pointer-events: none;
+}
+.sb-logo:hover .sb-logo-img {
+  filter: brightness(1.18) drop-shadow(0 2px 10px rgba(59,130,246,.4));
+}
+.sidebar.collapsed .sb-logo {
+  opacity: 0;
+  width: 0;
+  pointer-events: none;
+}
+
+.sb-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  color: var(--muted);
+  border-radius: 6px;
+  line-height: 1;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.sb-toggle:hover { background: var(--border); color: var(--text); }
+
+/* ── Nav sections ───────────────────────────────────────────────────────────── */
+.sb-nav { flex: 1; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+
+.sb-section-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 12px 8px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: opacity 0.15s;
+}
+.sidebar.collapsed .sb-section-label { opacity: 0; }
+
+.sb-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  position: relative;
+}
+.sb-item:hover { background: var(--border); color: var(--text); }
+.sb-item.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.sb-item.active .sb-icon { color: var(--accent); }
+
+.sb-icon {
+  font-size: 1.05rem;
+  flex-shrink: 0;
+  width: 22px;
+  text-align: center;
+  line-height: 1;
+}
+.sb-label {
+  opacity: 1;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+.sidebar.collapsed .sb-label { opacity: 0; }
+
+/* Notification badge on sidebar item */
+.sb-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  background: #dc2626;
+  color: #fff;
+  border-radius: 9px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  flex-shrink: 0;
+  transition: opacity 0.15s;
+}
+.sidebar.collapsed .sb-badge { opacity: 0; }
+
+/* ── Sidebar footer ─────────────────────────────────────────────────────────── */
+.sb-footer {
+  padding: 12px 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sb-user-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.sb-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+.sb-user-info { overflow: hidden; opacity: 1; transition: opacity 0.15s; }
+.sidebar.collapsed .sb-user-info { opacity: 0; }
+.sb-user-name { font-size: 0.82rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-user-email { font-size: 0.7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Main content ───────────────────────────────────────────────────────────── */
+.shell-main {
+  flex: 1;
+  overflow-x: hidden;
+  min-width: 0;
+}
+
+/* ── Mobile top bar ─────────────────────────────────────────────────────────── */
+.shell-topbar {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+.shell-topbar .sb-toggle { font-size: 1.3rem; padding: 6px; }
+
+/* Mobile overlay */
+.sb-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.4);
+  z-index: 99;
+}
+.sb-overlay.open { display: block; }
+
+/* ── Dashboard widgets ──────────────────────────────────────────────────────── */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.widget {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+.widget-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.total-balance-val {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.total-balance-sub { font-size: 0.8rem; color: var(--muted); margin-top: 3px; }
+
+.activity-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.activity-row:last-child { border-bottom: none; }
+.activity-type { font-weight: 600; color: var(--text); }
+.activity-time { font-size: 0.72rem; color: var(--muted); }
+.activity-amount-pos { color: var(--success); font-weight: 700; }
+.activity-amount-neg { color: var(--muted); font-weight: 700; }
+
+.quick-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.qa-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 14px 18px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--border);
+  cursor: pointer; text-decoration: none;
+  color: var(--text); font-size: 0.78rem; font-weight: 600;
+  transition: background 0.15s, border-color 0.15s;
+}
+.qa-btn:hover { background: var(--border); border-color: var(--accent); }
+.qa-icon { font-size: 1.3rem; }
+
+/* ── Tabs ───────────────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex; gap: 0; margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  padding: 9px 20px; font-size: 0.88rem; font-weight: 500;
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  margin-bottom: -1px;
+}
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tab-btn:hover:not(.active) { color: var(--text); }
+
+/* ── Responsive ─────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    transform: translateX(-100%);
+    transition: transform 0.22s cubic-bezier(0.4,0,0.2,1), width 0.22s;
+    width: 240px !important;
+    z-index: 200;
+  }
+  .sidebar.mobile-open {
+    transform: translateX(0);
+  }
+  .shell-topbar { display: flex; }
+  .shell-main { padding-top: 0; }
+}

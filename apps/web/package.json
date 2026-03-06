@@ -1,0 +1,26 @@
+{
+  "name": "@lumixpay/web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@lumixpay/shared": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-qr-code": "^2.0.18",
+    "react-router-dom": "^6.24.0",
+    "workbox-precaching": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.2",
+    "vite": "^5.3.1",
+    "vite-plugin-pwa": "^0.20.0"
+  }
+}

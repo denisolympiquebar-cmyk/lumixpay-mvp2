@@ -1,0 +1,62 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0f172a;
+  --surface:  #1e293b;
+  --border:   #334155;
+  --accent:   #6366f1;
+  --accent-h: #818cf8;
+  --text:     #f1f5f9;
+  --muted:    #94a3b8;
+  --danger:   #ef4444;
+  --success:  #22c55e;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 16px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+body { min-height: 100dvh; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-h); }
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  transition: background 0.15s;
+}
+button:hover { background: var(--accent-h); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.error { color: var(--danger); font-size: 0.85rem; margin-top: 8px; }
+.muted { color: var(--muted); font-size: 0.85rem; }
+
+@keyframes lpSlideIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
