@@ -24,9 +24,20 @@ export const config = {
     secret: process.env["JWT_SECRET"] ?? "change_this_secret",
     expiresIn: process.env["JWT_EXPIRES_IN"] ?? "24h",
   },
+  refreshToken: {
+    // Architecture placeholder for Phase 2 token refresh rollout.
+    // Not used for auth decisions yet (non-breaking).
+    enabled: (process.env["REFRESH_TOKEN_ENABLED"] ?? "false").toLowerCase() === "true",
+    expiresIn: process.env["REFRESH_TOKEN_EXPIRES_IN"] ?? "30d",
+  },
 
   fee: {
     rate: parseFloat(process.env["PLATFORM_FEE_RATE"] ?? "0.01"),
+  },
+
+  treasurySafety: {
+    // Alert when remaining inventory falls below this ratio of max_supply.
+    depletionWarnRatio: parseFloat(process.env["TREASURY_DEPLETION_WARN_RATIO"] ?? "0.10"),
   },
 
   system: {

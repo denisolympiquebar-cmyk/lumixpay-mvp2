@@ -23,7 +23,11 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
     const payload = jwt.verify(token, config.jwt.secret) as JwtPayload;
     req.user = payload;
     next();
-  } catch {
+  } catch (err: any) {
+    if (err?.name === "TokenExpiredError") {
+      res.status(401).json({ error: "TOKEN_EXPIRED", message: "Token expired, please login again." });
+      return;
+    }
     res.status(401).json({ error: "Invalid or expired token" });
   }
 }

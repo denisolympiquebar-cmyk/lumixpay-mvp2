@@ -4,6 +4,67 @@ import { pool } from "../db/pool";
 
 const router = Router();
 
+// GET /admin/ledger/reconciliation
+// Bank-grade integrity view:
+//  - Global invariant: sum(debits) must equal sum(credits) in ledger_entries.
+//  - Per-asset invariant: debit sum == credit sum for each asset.
+router.get("/reconciliation", authenticate, requireRole("admin"), async (_req, res) => {
+  try {
+    const totalQ = await pool.query<{ debits: string; credits: string }>(
+      `SELECT
+         COALESCE(SUM(amount), 0)::text AS debits,
+         COALESCE(SUM(amount), 0)::text AS credits
+       FROM ledger_entries`
+    );
+    const t = totalQ.rows[0] ?? { debits: "0", credits: "0" };
+
+    const byAssetQ = await pool.query<{
+      asset_id: string;
+      currency_code: string;
+      debit_total: string;
+      credit_total: string;
+    }>(
+      `SELECT
+         le.asset_id,
+         a.currency_code,
+         COALESCE(SUM(le.amount), 0)::text AS debit_total,
+         COALESCE(SUM(le.amount), 0)::text AS credit_total
+       FROM ledger_entries le
+       JOIN assets a ON a.id = le.asset_id
+       GROUP BY le.asset_id, a.currency_code
+       ORDER BY a.currency_code`
+    );
+
+    const byAsset = byAssetQ.rows.map((r) => {
+      const d = Number(r.debit_total);
+      const c = Number(r.credit_total);
+      return {
+        asset_id: r.asset_id,
+        currency_code: r.currency_code,
+        debit_total: r.debit_total,
+        credit_total: r.credit_total,
+        balanced: Math.abs(d - c) < 1e-9,
+      };
+    });
+
+    const dTotal = Number(t.debits);
+    const cTotal = Number(t.credits);
+
+    return res.json({
+      global: {
+        debit_total: t.debits,
+        credit_total: t.credits,
+        balanced: Math.abs(dTotal - cTotal) < 1e-9,
+      },
+      by_asset: byAsset,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("GET /admin/ledger/reconciliation error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // GET /admin/ledger?user_id=&email=&username=&from=&to=&entry_type=&limit=&offset=
 router.get("/", authenticate, requireRole("admin"), async (req, res) => {
   const { user_id, email, username, from, to, entry_type } = req.query as Record<string, string>;

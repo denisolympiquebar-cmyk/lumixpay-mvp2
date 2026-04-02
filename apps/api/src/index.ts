@@ -32,15 +32,74 @@ import { seedAdminIfEnabled } from "./services/AdminSeedService";
 import { startRecurringJob }  from "./services/RecurringService";
 import { authLimiter, mutationLimiter, devLimiter } from "./middleware/rate-limit";
 import { usageLogger } from "./middleware/usage-logger";
+import { correlationId } from "./middleware/correlation";
+import { pool } from "./db/pool";
 
 const app = express();
 
 app.use(helmet());
-app.use(cors({ origin: process.env["CORS_ORIGIN"] ?? "*" }));
+// Harden CORS: explicit allow-list only (comma-separated).
+// Use "*" only if explicitly set to "*" (backward compatible for dev).
+const corsOrigin = process.env["CORS_ORIGIN"] ?? "*";
+const corsAllowList = corsOrigin
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // non-browser clients
+      if (corsAllowList.includes("*")) return cb(null, true);
+      if (corsAllowList.includes(origin)) return cb(null, true);
+      return cb(new Error("CORS not allowed"), false);
+    },
+    credentials: true,
+  })
+);
+app.use(correlationId);
 app.use(express.json());
 
 // ── Health ────────────────────────────────────────────────────────────────────
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/health", async (_req, res) => {
+  const start = Date.now();
+  try {
+    await pool.query("SELECT 1");
+    const dbLatencyMs = Date.now() - start;
+    return res.json({ status: "ok", db: { ok: true, latency_ms: dbLatencyMs }, queue: { ok: true } });
+  } catch (err) {
+    console.error("health db check failed:", err);
+    const dbLatencyMs = Date.now() - start;
+    return res.status(503).json({ status: "degraded", db: { ok: false, latency_ms: dbLatencyMs }, queue: { ok: true } });
+  }
+});
+
+// ── Metrics (minimal Prometheus-compatible) ───────────────────────────────────
+app.get("/metrics", async (_req, res) => {
+  try {
+    const [usage, alerts] = await Promise.all([
+      pool.query<{ c: string }>("SELECT COUNT(*)::text AS c FROM api_usage_logs"),
+      pool.query<{ c: string }>("SELECT COUNT(*)::text AS c FROM admin_alerts WHERE is_resolved = false"),
+    ]);
+    const lines = [
+      "# HELP lumixpay_api_usage_logs_total Total api_usage_logs rows",
+      "# TYPE lumixpay_api_usage_logs_total counter",
+      `lumixpay_api_usage_logs_total ${Number(usage.rows[0]?.c ?? "0")}`,
+      "# HELP lumixpay_admin_alerts_open_total Open admin alerts",
+      "# TYPE lumixpay_admin_alerts_open_total gauge",
+      `lumixpay_admin_alerts_open_total ${Number(alerts.rows[0]?.c ?? "0")}`,
+    ];
+    res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    return res.send(lines.join("\n") + "\n");
+  } catch (err) {
+    console.error("/metrics error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── Version ───────────────────────────────────────────────────────────────────
+app.get("/version", (_req, res) =>
+  res.json({ name: "lumixpay-api", version: "1.0.0", env: config.nodeEnv })
+);
 
 // ── Auth (strict rate limit) ──────────────────────────────────────────────────
 app.use("/auth", authLimiter, authRouter);
@@ -50,7 +109,7 @@ app.use("/auth", authLimiter, authRouter);
 app.use("/", accountsRouter);
 
 // ── Profile & username ────────────────────────────────────────────────────────
-// GET /me/profile, POST /me/username
+// GET /me/profile, POST /me/username, POST/PATCH/DELETE /me/profile/wallet*
 app.use("/me", meRouter);
 
 // ── Core money flows (moderate rate limit + usage logging) ───────────────────

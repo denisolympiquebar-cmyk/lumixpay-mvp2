@@ -1,5 +1,7 @@
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
+import { config } from "../config";
+import { adminAlertService } from "./AdminAlertService";
 
 /**
  * TreasuryService — governs the available inventory of each asset.
@@ -68,6 +70,27 @@ export class TreasuryService {
       };
       throw err;
     }
+
+    const max = new Decimal(rows[0].max_supply);
+    if (max.gt(0)) {
+      const remainingRatio = available.div(max).toNumber();
+      if (remainingRatio <= config.treasurySafety.depletionWarnRatio) {
+        void adminAlertService.emit({
+          type: "treasury.depletion_risk",
+          title: "Treasury depletion risk",
+          body: `Asset ${assetId} inventory is at ${(remainingRatio * 100).toFixed(2)}% of max supply`,
+          severity: remainingRatio <= config.treasurySafety.depletionWarnRatio / 2 ? "critical" : "warning",
+          metadata: {
+            asset_id: assetId,
+            current_supply: available.toFixed(6),
+            max_supply: max.toFixed(6),
+            ratio: remainingRatio,
+          },
+          dedupeKey: `treasury:${assetId}`,
+          dedupeMinutes: 15,
+        });
+      }
+    }
   }
 
   /**
@@ -79,13 +102,16 @@ export class TreasuryService {
     assetId: string,
     amount: Decimal
   ): Promise<void> {
-    await client.query(
+    const res = await client.query(
       `UPDATE treasury_limits
           SET current_supply = current_supply - $1,
               updated_at     = NOW()
         WHERE asset_id = $2`,
       [amount.toFixed(6), assetId]
     );
+    if (res.rowCount === 0) {
+      throw new Error(`Treasury row not found for asset ${assetId}`);
+    }
   }
 
   /**

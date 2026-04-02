@@ -136,18 +136,18 @@ function PublicFooter() {
         <div className="footer-col">
           <h4>Developers</h4>
           <ul>
-            <li><Link to="/docs">Quickstart</Link></li>
-            <li><Link to="/developers">API Reference</Link></li>
-            <li><Link to="/docs">Webhooks</Link></li>
-            <li><Link to="/docs">SDKs</Link></li>
+            <li><Link to="/docs">API Reference</Link></li>
+            <li><Link to="/developers">Overview</Link></li>
+            <li><Link to="/architecture">Architecture</Link></li>
+            <li><Link to="/docs#webhooks">Webhooks</Link></li>
           </ul>
         </div>
 
         <div className="footer-col">
           <h4>Company</h4>
           <ul>
+            <li><Link to="/demo">Live Demo</Link></li>
             <li><a href="#">About</a></li>
-            <li><a href="#">Blog</a></li>
             <li><a href="#">GitHub</a></li>
             <li><a href="#">Privacy</a></li>
           </ul>

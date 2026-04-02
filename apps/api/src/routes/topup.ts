@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authenticate } from "../middleware/auth";
 import { requireNotFrozen } from "../middleware/frozen";
 import { idempotent } from "../middleware/idempotency";
+import { requireIdempotencyKey } from "../middleware/require-idempotency";
 import { ledgerService } from "../services/LedgerService";
 import { pool } from "../db/pool";
 import { ALLOWED_TOPUP_AMOUNTS } from "../services/MockPaymentProvider";
@@ -22,7 +23,7 @@ const TopUpSchema = z.object({
 });
 
 // POST /topup
-router.post("/", authenticate, requireNotFrozen, idempotent, async (req, res) => {
+router.post("/", authenticate, requireNotFrozen, requireIdempotencyKey, idempotent, async (req, res) => {
   const parsed = TopUpSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({

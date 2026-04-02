@@ -17,6 +17,10 @@ export interface ApiUser {
   email: string;
   full_name: string;
   role: UserRole;
+  /** Present on profile; optional XRPL Testnet link (verified). */
+  xrpl_address?: string | null;
+  xrpl_network?: string | null;
+  xrpl_verified_at?: string | null;
 }
 
 export interface ApiAsset {

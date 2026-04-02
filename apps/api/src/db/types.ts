@@ -42,6 +42,10 @@ export interface User {
   username: string | null;
   is_frozen: boolean;
   created_at: Date;
+  /** Optional linked XRPL classic address (verified). */
+  xrpl_address?: string | null;
+  xrpl_network?: string | null;
+  xrpl_verified_at?: Date | null;
 }
 
 export interface VoucherProduct {
@@ -142,6 +146,12 @@ export interface WithdrawalRequest {
   xrpl_tx_hash: string | null;
   created_at: Date;
   updated_at: Date;
+  // ── Settlement tracking (added by migration 019) ──────────────────────────
+  // NULL = not yet attempted. See 019_xrpl_settlement.sql for full semantics.
+  settlement_provider: string | null;    // 'mock' | 'xrpl' | null
+  xrpl_submitted_at: Date | null;        // set before provider call (crash safety)
+  xrpl_confirmed_at: Date | null;        // set after provider confirms
+  xrpl_network_fee_xrp: string | null;   // XRP fee (Phase 2); NUMERIC comes as string from pg
 }
 
 // ── Enriched read models ──────────────────────────────────────────────────────

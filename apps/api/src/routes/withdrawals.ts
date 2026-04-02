@@ -3,9 +3,12 @@ import { z } from "zod";
 import { authenticate, requireRole } from "../middleware/auth";
 import { requireNotFrozen } from "../middleware/frozen";
 import { idempotent } from "../middleware/idempotency";
+import { requireIdempotencyKey } from "../middleware/require-idempotency";
+import { withdrawalRiskGuard } from "../middleware/withdrawal-risk";
 import { ledgerService } from "../services/LedgerService";
 import { pool } from "../db/pool";
 import { Account, WithdrawalRequest } from "../db/types";
+import { auditLogService } from "../services/AuditLogService";
 
 const router = Router();
 
@@ -24,7 +27,7 @@ const ReviewSchema = z.object({
 });
 
 // POST /withdrawals — user requests a withdrawal
-router.post("/", authenticate, requireNotFrozen, idempotent, async (req, res) => {
+router.post("/", authenticate, requireNotFrozen, requireIdempotencyKey, idempotent, withdrawalRiskGuard, async (req, res) => {
   const parsed = WithdrawalRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
@@ -119,11 +122,68 @@ router.post(
         note: parsed.data.note,
       });
 
+      void auditLogService.log({
+        actorUserId: req.user?.sub ?? null,
+        actionType: "admin.withdrawal.review",
+        entityType: "withdrawal_requests",
+        entityId: withdrawal.id,
+        correlationId: req.correlationId ?? null,
+        metadata: { decision: parsed.data.decision, note: parsed.data.note ?? null },
+      });
       return res.json({ withdrawal });
     } catch (err: any) {
       console.error("review withdrawal error:", err);
       const status = err.message?.includes("not found") ? 404 : 400;
       return res.status(status).json({ error: err.message ?? "Review failed" });
+    }
+  }
+);
+
+// POST /admin/withdrawals/:id/settle — admin: execute settlement for an approved withdrawal
+//
+// Preconditions:
+//   - Withdrawal must be in status 'approved' (call /review first)
+//   - Withdrawal must not already be in-flight (xrpl_submitted_at set, xrpl_confirmed_at null)
+//
+// Idempotency:
+//   - If already status='settled', returns the existing row (200) without re-executing.
+//   - If SETTLEMENT_PROVIDER=xrpl (Phase 2), a real XRPL TX is submitted and awaited.
+//   - If SETTLEMENT_PROVIDER=mock (default, Phase 1), returns a simulated confirmed result.
+//
+// ── XRPL INTEGRATION POINT ───────────────────────────────────────────────────
+// Phase 2: set env var SETTLEMENT_PROVIDER=xrpl and implement XrplSettlementService.
+// This route and LedgerService.settleWithdrawal() need no further changes.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post(
+  "/admin/:id/settle",
+  authenticate,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const withdrawal = await ledgerService.settleWithdrawal({
+        withdrawalId: req.params["id"]!,
+        adminId:      req.user!.sub,
+      });
+      void auditLogService.log({
+        actorUserId: req.user?.sub ?? null,
+        actionType: "admin.withdrawal.settle",
+        entityType: "withdrawal_requests",
+        entityId: withdrawal.id,
+        correlationId: req.correlationId ?? null,
+        metadata: { status: withdrawal.status, tx_hash: withdrawal.xrpl_tx_hash ?? null },
+      });
+      return res.json({ withdrawal });
+    } catch (err: any) {
+      const httpStatus =
+        typeof err.status === "number"
+          ? err.status
+          : err.message?.includes("not found")
+          ? 404
+          : 400;
+      return res.status(httpStatus).json({
+        error: err.message ?? "Settlement failed",
+        code:  err.code   ?? undefined,
+      });
     }
   }
 );

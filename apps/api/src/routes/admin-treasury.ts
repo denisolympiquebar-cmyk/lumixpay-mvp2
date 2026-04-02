@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { authenticate, requireRole } from "../middleware/auth";
 import { pool } from "../db/pool";
+import { auditLogService } from "../services/AuditLogService";
 
 const router = Router();
 
@@ -120,8 +121,24 @@ router.put("/:asset_id", authenticate, requireRole("admin"), async (req, res) =>
          VALUES ($1, $2, $3) RETURNING *`,
         [asset_id, max_supply ?? 1000000, current_supply ?? 0]
       );
+      void auditLogService.log({
+        actorUserId: req.user?.sub ?? null,
+        actionType: "admin.treasury.upsert",
+        entityType: "treasury_limits",
+        entityId: asset_id,
+        correlationId: req.correlationId ?? null,
+        metadata: { max_supply: max_supply ?? 1000000, current_supply: current_supply ?? 0 },
+      });
       return res.json({ limit: insertRes.rows[0] });
     }
+    void auditLogService.log({
+      actorUserId: req.user?.sub ?? null,
+      actionType: "admin.treasury.update",
+      entityType: "treasury_limits",
+      entityId: asset_id,
+      correlationId: req.correlationId ?? null,
+      metadata: { max_supply, current_supply },
+    });
     return res.json({ limit: rows[0] });
   } catch (err) {
     console.error("PUT /admin/treasury/:asset_id error:", err);

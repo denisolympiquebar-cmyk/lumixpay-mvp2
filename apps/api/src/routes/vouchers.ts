@@ -5,6 +5,7 @@ import Decimal from "decimal.js";
 import { authenticate, requireRole } from "../middleware/auth";
 import { requireNotFrozen } from "../middleware/frozen";
 import { idempotent } from "../middleware/idempotency";
+import { requireIdempotencyKey } from "../middleware/require-idempotency";
 import { pool, withTransaction } from "../db/pool";
 import { Voucher, Account } from "../db/types";
 import { ledgerService } from "../services/LedgerService";
@@ -82,7 +83,7 @@ router.post("/admin/:id/disable", authenticate, requireRole("admin"), async (req
 const RedeemSchema = z.object({ code: z.string().min(1) });
 
 // POST /vouchers/redeem
-router.post("/redeem", authenticate, requireNotFrozen, idempotent, async (req, res) => {
+router.post("/redeem", authenticate, requireNotFrozen, requireIdempotencyKey, idempotent, async (req, res) => {
   const parsed = RedeemSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });

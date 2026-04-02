@@ -5,14 +5,23 @@ import QRCode from "react-qr-code";
 import { apiFetch } from "./lib/api";
 import { ToastProvider, useToast } from "./lib/toast";
 import { canInstall, promptInstall, isIos, isInStandaloneMode } from "./lib/pwa-install";
-import { subscribeToPush, unsubscribeFromPush, pushEnabled } from "./lib/push-notifications";
+import { subscribeToPush, unsubscribeFromPush, pushEnabled, getPushStatus, type PushUiStatus } from "./lib/push-notifications";
 import { useStream } from "./lib/use-stream";
 import "./dashboard.css";
-import LandingPage     from "./pages/LandingPage";
+import LandingPage      from "./pages/LandingPage";
 import { LoadingOverlay } from "./components/LoadingOverlay";
-import PricingPage     from "./pages/PricingPage";
-import DevelopersPage  from "./pages/DevelopersPage";
-import DocsPage        from "./pages/DocsPage";
+import PricingPage      from "./pages/PricingPage";
+import DevelopersPage   from "./pages/DevelopersPage";
+import DocsPage         from "./pages/DocsPage";
+import DemoPage         from "./pages/DemoPage";
+import ArchitecturePage from "./pages/ArchitecturePage";
+
+// Google login (GIS)
+declare global {
+  interface Window {
+    google?: any;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Auth context
@@ -21,6 +30,7 @@ import DocsPage        from "./pages/DocsPage";
 interface AuthCtx {
   token: string | null;
   user: ApiUser | null;
+  ready: boolean;
   login: (token: string, user: ApiUser) => void;
   logout: () => void;
 }
@@ -28,6 +38,7 @@ interface AuthCtx {
 const AuthContext = createContext<AuthCtx>({
   token: null,
   user: null,
+  ready: true,
   login: () => {},
   logout: () => {},
 });
@@ -38,21 +49,53 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const raw = localStorage.getItem("lp_user");
     return raw ? JSON.parse(raw) : null;
   });
+  const [ready, setReady] = useState<boolean>(() => !localStorage.getItem("lp_token"));
 
   const login = (t: string, u: ApiUser) => {
     localStorage.setItem("lp_token", t);
     localStorage.setItem("lp_user", JSON.stringify(u));
     setToken(t);
     setUser(u);
+    setReady(true);
   };
   const logout = () => {
     localStorage.removeItem("lp_token");
     localStorage.removeItem("lp_user");
     setToken(null);
     setUser(null);
+    setReady(true);
   };
 
-  return <AuthContext.Provider value={{ token, user, login, logout }}>{children}</AuthContext.Provider>;
+  // Bootstrapping: validate stored token and hydrate profile before route guards run.
+  useEffect(() => {
+    let cancelled = false;
+    if (!token) { setReady(true); return; }
+
+    setReady(false);
+    apiFetch<{ profile: ApiUser }>("/me/profile", token)
+      .then((d) => {
+        if (cancelled) return;
+        if (d?.profile) {
+          setUser(d.profile);
+          localStorage.setItem("lp_user", JSON.stringify(d.profile));
+        }
+        setReady(true);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        // Invalid / expired token → clear session (only case we force logout).
+        console.warn("[auth] session restore failed:", e?.message ?? e);
+        localStorage.removeItem("lp_token");
+        localStorage.removeItem("lp_user");
+        setToken(null);
+        setUser(null);
+        setReady(true);
+      });
+
+    return () => { cancelled = true; };
+  }, [token]);
+
+  return <AuthContext.Provider value={{ token, user, ready, login, logout }}>{children}</AuthContext.Provider>;
 }
 
 function useAuth() {
@@ -250,7 +293,7 @@ function calcFee(gross: number): { fee: string; net: string } {
   return { fee: fee.toFixed(2), net: (gross - fee).toFixed(2) };
 }
 
-function CopyButton({ text }: { text: string }) {
+function CopyButton({ text, label, style }: { text: string; label?: string; style?: React.CSSProperties }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     navigator.clipboard.writeText(text).then(() => {
@@ -262,11 +305,104 @@ function CopyButton({ text }: { text: string }) {
     <button
       type="button"
       onClick={copy}
-      style={{ padding: "2px 8px", fontSize: "0.75rem", background: "var(--border)", marginLeft: 6 }}
+      style={{ padding: "2px 8px", fontSize: "0.75rem", background: "var(--border)", marginLeft: 6, ...style }}
     >
-      {copied ? "✓ Copied" : "Copy"}
+      {copied ? "✓ Copied" : (label ?? "Copy")}
     </button>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Financial UX primitives — used across all transaction pages
+// ─────────────────────────────────────────────────────────────────────────────
+
+function SkeletonLoader({ rows = 3, widths }: { rows?: number; widths?: number[] }) {
+  return (
+    <div className="skeleton-wrap">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div
+          key={i}
+          className="skeleton-row"
+          style={{ width: `${widths?.[i] ?? 88 - i * 14}%` }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const cls: Record<string, string> = {
+    pending: "badge-pending", processing: "badge-processing",
+    approved: "badge-approved", settled: "badge-settled",
+    rejected: "badge-rejected", active: "badge-active", used: "badge-used",
+  };
+  return (
+    <span className={`status-badge ${cls[status] ?? "badge-pending"}`}>
+      {status.charAt(0).toUpperCase() + status.slice(1)}
+    </span>
+  );
+}
+
+function FeedbackBanner({ type, message }: { type: "success" | "error" | "info" | "warning"; message: string }) {
+  if (!message) return null;
+  const icons = { success: "✓", error: "✕", info: "ℹ", warning: "⚠" };
+  return (
+    <div className={`feedback-banner feedback-${type}`}>
+      <span className="fb-icon">{icons[type]}</span>
+      <span>{message}</span>
+    </div>
+  );
+}
+
+function InlineHelp({ children }: { children: React.ReactNode }) {
+  return <p className="inline-help">{children}</p>;
+}
+
+function ConfirmRow({ label, value, highlight = false }: {
+  label: string; value: React.ReactNode; highlight?: boolean;
+}) {
+  return (
+    <div className="confirm-row">
+      <span className="confirm-label">{label}</span>
+      <span className={`confirm-value${highlight ? " highlight" : ""}`}>{value}</span>
+    </div>
+  );
+}
+
+// Map raw backend error codes / messages to user-friendly strings
+const ERROR_FRIENDLY: Record<string, string> = {
+  TREASURY_EMPTY:          "This currency is temporarily unavailable. Please try again later.",
+  TREASURY_INSUFFICIENT:   "Insufficient platform inventory. Try a smaller amount.",
+  INSUFFICIENT_FUNDS:      "Your balance is too low for this transaction.",
+  INSUFFICIENT_BALANCE:    "Your balance is too low for this transaction.",
+  USER_FROZEN:             "Your account has been suspended. Please contact support.",
+  IDEMPOTENCY_CONFLICT:    "This request was already submitted. Refresh to see the result.",
+  RATE_LIMITED:            "Too many requests. Please wait a moment and try again.",
+  INVALID_VOUCHER:         "This voucher code is invalid or has already been redeemed.",
+  VOUCHER_USED:            "This voucher has already been redeemed.",
+  NOT_FOUND:               "The requested resource was not found.",
+  UNAUTHORIZED:            "Your session has expired. Please log in again.",
+  SETTLEMENT_IN_FLIGHT:    "Settlement is already in progress for this withdrawal.",
+  ALREADY_SETTLED:         "This withdrawal has already been settled.",
+  XRPL_ADDRESS_INVALID:         "That XRPL address does not look valid. Use a classic Testnet address (starts with r).",
+  WALLET_CHALLENGE_INVALID:     "This verification message is invalid. Request a new one and try again.",
+  WALLET_CHALLENGE_EXPIRED:     "The verification message expired. Request a new one.",
+  XRPL_PUBLIC_KEY_INVALID:      "The public key could not be read. Paste the hex public key from your wallet (ED… or 02/03…).",
+  XRPL_ADDRESS_KEY_MISMATCH:    "The public key does not match this XRPL address.",
+  XRPL_SIGNATURE_INVALID:       "The signature could not be verified for this message and key.",
+  XRPL_ADDRESS_ALREADY_LINKED:  "This XRPL address is already linked to another LumixPay account.",
+  XRPL_SIGNING_PUBKEY_UNAVAILABLE:
+    "Could not read a signing key for this address on XRPL Testnet. Use a funded Testnet account with an active master key, or try again later.",
+  XRPL_RPC_ERROR:               "Could not reach XRPL Testnet. Check your connection and try again.",
+};
+
+function friendlyError(err: any): string {
+  const raw: string = err?.message ?? String(err ?? "Something went wrong");
+  for (const [code, msg] of Object.entries(ERROR_FRIENDLY)) {
+    if (raw.toUpperCase().includes(code)) return msg;
+  }
+  if (!raw || /^[0-9a-f-]{20,}$/i.test(raw)) return "Something went wrong. Please try again.";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +415,53 @@ function LoginPage() {
   const [form, setForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [gLoading, setGLoading] = useState(false);
+  const googleBtnRef = React.useRef<HTMLDivElement | null>(null);
+  const googleClientId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+
+  const onGoogleCredential = useCallback(async (credential: string) => {
+    setError("");
+    setGLoading(true);
+    try {
+      const data = await apiFetch<{ token: string; user: ApiUser }>("/auth/google", null, {
+        method: "POST",
+        body: JSON.stringify({ id_token: credential }),
+      });
+      login(data.token, data.user);
+      navigate("/dashboard");
+    } catch (e: any) {
+      setError(e?.message ?? "Google login failed");
+    } finally {
+      setGLoading(false);
+    }
+  }, [login, navigate]);
+
+  useEffect(() => {
+    if (!googleClientId) return;
+    const g = window.google;
+    if (!g?.accounts?.id || !googleBtnRef.current) return;
+    try {
+      g.accounts.id.initialize({
+        client_id: googleClientId,
+        locale: "en",
+        callback: (resp: any) => {
+          const cred = resp?.credential;
+          if (typeof cred === "string" && cred.length > 0) void onGoogleCredential(cred);
+          else setError("Google sign-in did not return a credential");
+        },
+        ux_mode: "popup",
+      });
+      googleBtnRef.current.innerHTML = "";
+      g.accounts.id.renderButton(googleBtnRef.current, {
+        theme: "outline",
+        size: "large",
+        width: 320,
+        text: "continue_with",
+      });
+    } catch (e) {
+      console.error("GIS init error:", e);
+    }
+  }, [googleClientId, onGoogleCredential]);
 
   const handle = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -300,8 +483,25 @@ function LoginPage() {
 
   return (
     <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "100dvh", padding: "20px" }}>
-      <div className="card" style={{ width: "100%", maxWidth: 400 }}>
+      <div style={{ width: "100%", maxWidth: 400 }}>
+        <div style={{ marginBottom: 10 }}>
+          <Link to="/" className="muted" style={{ fontSize: "0.85rem", textDecoration: "none" }}>
+            ← Back to Home
+          </Link>
+        </div>
+        <div className="card" style={{ width: "100%" }}>
         <h1 style={{ marginBottom: 24, fontSize: "1.5rem" }}>LumixPay</h1>
+        {googleClientId && (
+          <div style={{ marginBottom: 14 }}>
+            <div ref={googleBtnRef} />
+            {gLoading && <p className="muted" style={{ marginTop: 8, fontSize: "0.82rem" }}>Signing in with Google…</p>}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0" }}>
+              <div style={{ height: 1, flex: 1, background: "var(--border)" }} />
+              <span className="muted" style={{ fontSize: "0.78rem" }}>or</span>
+              <div style={{ height: 1, flex: 1, background: "var(--border)" }} />
+            </div>
+          </div>
+        )}
         <form onSubmit={handle} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <input
             type="email"
@@ -326,6 +526,7 @@ function LoginPage() {
           </p>
         </form>
       </div>
+      </div>
     </div>
   );
 }
@@ -336,6 +537,53 @@ function RegisterPage() {
   const [form, setForm] = useState({ email: "", password: "", full_name: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [gLoading, setGLoading] = useState(false);
+  const googleBtnRef = React.useRef<HTMLDivElement | null>(null);
+  const googleClientId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+
+  const onGoogleCredential = useCallback(async (credential: string) => {
+    setError("");
+    setGLoading(true);
+    try {
+      const data = await apiFetch<{ token: string; user: ApiUser }>("/auth/google", null, {
+        method: "POST",
+        body: JSON.stringify({ id_token: credential }),
+      });
+      login(data.token, data.user);
+      navigate("/dashboard");
+    } catch (e: any) {
+      setError(e?.message ?? "Google signup failed");
+    } finally {
+      setGLoading(false);
+    }
+  }, [login, navigate]);
+
+  useEffect(() => {
+    if (!googleClientId) return;
+    const g = window.google;
+    if (!g?.accounts?.id || !googleBtnRef.current) return;
+    try {
+      g.accounts.id.initialize({
+        client_id: googleClientId,
+        locale: "en",
+        callback: (resp: any) => {
+          const cred = resp?.credential;
+          if (typeof cred === "string" && cred.length > 0) void onGoogleCredential(cred);
+          else setError("Google sign-up did not return a credential");
+        },
+        ux_mode: "popup",
+      });
+      googleBtnRef.current.innerHTML = "";
+      g.accounts.id.renderButton(googleBtnRef.current, {
+        theme: "outline",
+        size: "large",
+        width: 320,
+        text: "continue_with",
+      });
+    } catch (e) {
+      console.error("GIS init error:", e);
+    }
+  }, [googleClientId, onGoogleCredential]);
 
   const handle = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -357,8 +605,25 @@ function RegisterPage() {
 
   return (
     <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "100dvh", padding: "20px" }}>
-      <div className="card" style={{ width: "100%", maxWidth: 400 }}>
+      <div style={{ width: "100%", maxWidth: 400 }}>
+        <div style={{ marginBottom: 10 }}>
+          <Link to="/" className="muted" style={{ fontSize: "0.85rem", textDecoration: "none" }}>
+            ← Back to Home
+          </Link>
+        </div>
+        <div className="card" style={{ width: "100%" }}>
         <h1 style={{ marginBottom: 24, fontSize: "1.5rem" }}>Create Account</h1>
+        {googleClientId && (
+          <div style={{ marginBottom: 14 }}>
+            <div ref={googleBtnRef} />
+            {gLoading && <p className="muted" style={{ marginTop: 8, fontSize: "0.82rem" }}>Continuing with Google…</p>}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0" }}>
+              <div style={{ height: 1, flex: 1, background: "var(--border)" }} />
+              <span className="muted" style={{ fontSize: "0.78rem" }}>or</span>
+              <div style={{ height: 1, flex: 1, background: "var(--border)" }} />
+            </div>
+          </div>
+        )}
         <form onSubmit={handle} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <input
             placeholder="Full name"
@@ -389,6 +654,7 @@ function RegisterPage() {
             Have an account? <Link to="/login">Sign in</Link>
           </p>
         </form>
+      </div>
       </div>
     </div>
   );
@@ -439,28 +705,38 @@ function DashboardPage() {
         </button>
       </header>
 
-      {loading && <p className="muted">Loading…</p>}
-      {error && <p className="error">{error}</p>}
+      {loading && (
+        <div className="dash-grid" style={{ marginBottom: 24 }}>
+          {[0, 1].map((i) => (
+            <div key={i} className="widget"><SkeletonLoader rows={3} widths={[55, 80, 45]} /></div>
+          ))}
+        </div>
+      )}
+      {error && <FeedbackBanner type="error" message={error} />}
 
       {/* Balance cards */}
-      <div className="dash-grid">
-        {accounts.map((acc) => (
-          <div key={acc.id} className="widget">
-            <div className="widget-title">{acc.asset.display_name}</div>
-            <div style={{ fontSize: "2rem", fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text)" }}>
-              {formatMoney(acc.balance.available)}
+      {!loading && (
+        <div className="dash-grid">
+          {accounts.map((acc) => (
+            <div key={acc.id} className="widget balance-card">
+              <div className="balance-currency">
+                {acc.asset.display_name}
+                <span className="settle-tag">internal</span>
+              </div>
+              <div style={{ fontSize: "2rem", fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text)", margin: "6px 0 4px" }}>
+                {formatMoney(acc.balance.available)}
+                <span style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--muted)", marginLeft: 8 }}>{acc.asset.display_symbol}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: "0.73rem", color: "var(--muted)" }}>Available balance</span>
+                {parseFloat(String(acc.balance.locked)) > 0 && (
+                  <span className="locked-amount">🔒 {formatMoney(acc.balance.locked)} locked</span>
+                )}
+              </div>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-              <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>{acc.asset.display_symbol}</span>
-              {parseFloat(String(acc.balance.locked)) > 0 && (
-                <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
-                  {formatMoney(acc.balance.locked)} locked
-                </span>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Quick actions */}
       <div className="widget" style={{ marginBottom: 20 }}>
@@ -476,28 +752,40 @@ function DashboardPage() {
 
       {/* Recent activity */}
       <div className="widget">
-        <div className="widget-title">Recent Activity</div>
-        {activity.length === 0 ? (
-          <p className="muted" style={{ padding: "12px 0" }}>No transactions yet.</p>
-        ) : (
-          activity.map((e) => {
-            const acc = accounts.find(
-              (a) => a.id === e.credit_account_id || a.id === e.debit_account_id
-            );
-            const incoming = acc && e.credit_account_id === acc.id;
-            return (
-              <div key={e.id} className="activity-row">
+        <div className="widget-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Recent Activity</span>
+          <Link to="/history" style={{ fontSize: "0.72rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>View all →</Link>
+        </div>
+        {loading && <SkeletonLoader rows={4} widths={[100, 100, 100, 100]} />}
+        {!loading && activity.length === 0 && (
+          <div style={{ padding: "16px 0", textAlign: "center" }}>
+            <p className="muted" style={{ marginBottom: 8 }}>No transactions yet.</p>
+            <Link to="/topup" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+              Make your first top-up →
+            </Link>
+          </div>
+        )}
+        {!loading && activity.map((e) => {
+          const acc = accounts.find(
+            (a) => a.id === e.credit_account_id || a.id === e.debit_account_id
+          );
+          const incoming = acc && e.credit_account_id === acc.id;
+          const icon = ENTRY_ICON[e.entry_type] ?? "·";
+          return (
+            <div key={e.id} className="activity-row">
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.85rem", flexShrink: 0 }}>{icon}</span>
                 <div>
                   <div className="activity-type">{ENTRY_LABEL[e.entry_type] ?? e.entry_type}</div>
                   <div className="activity-time">{new Date(e.created_at).toLocaleString()}</div>
                 </div>
-                <span className={incoming ? "activity-amount-pos" : "activity-amount-neg"}>
-                  {incoming ? "+" : "−"}{formatMoney(e.amount)} {acc?.asset.display_symbol ?? ""}
-                </span>
               </div>
-            );
-          })
-        )}
+              <span className={incoming ? "activity-amount-pos" : "activity-amount-neg"}>
+                {incoming ? "+" : "−"}{formatMoney(e.amount)} {acc?.asset.display_symbol ?? ""}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -518,77 +806,145 @@ function TopUpPage() {
   const [amount, setAmount] = useState<number>(20);
   const [last4, setLast4] = useState("4242");
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState<string>("");
+  const [step, setStep] = useState<"form" | "confirm" | "success">("form");
+  const [successData, setSuccessData] = useState<{ net: string; symbol: string } | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
-    // pick RLUSD as default once accounts arrive
     const rlusd = getAccountBySymbol(accounts, "RLUSD");
     if (!assetId && rlusd?.asset_id) setAssetId(rlusd.asset_id);
   }, [accounts, assetId]);
 
-  const handle = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setMsg("");
+  const selectedAcc = accounts.find((a) => a.asset_id === assetId);
+  const feeCalc = calcFee(amount);
+
+  const handleConfirm = async () => {
+    setErrorMsg("");
     setLoading(true);
     try {
       await apiFetch("/topup", token, {
         method: "POST",
         body: JSON.stringify({ asset_id: assetId, gross_amount: amount, simulated_card_last4: last4 }),
       });
-      await refresh(); // ✅ auto-refresh balances
+      await refresh();
       void refreshNotifs();
-      setMsg("Top up completed ✅");
+      setSuccessData({ net: feeCalc.net, symbol: selectedAcc?.asset.display_symbol ?? "" });
+      setStep("success");
       addToast("Top-up completed!", "success");
     } catch (err: any) {
-      setMsg(err.message ?? "Top up failed");
-      addToast(err.message ?? "Top-up failed", "error");
+      const msg = friendlyError(err);
+      setErrorMsg(msg);
+      addToast(msg, "error");
+      setStep("form");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{ maxWidth: 600, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2>Top Up</h2>
+    <div style={{ maxWidth: 540, margin: "0 auto", padding: "24px 16px" }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ marginBottom: 2 }}>Top Up</h2>
+          <p className="muted" style={{ fontSize: "0.78rem" }}>Add funds to your LumixPay balance</p>
+        </div>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
           Back
         </button>
       </header>
 
-      <div className="card">
-        <form onSubmit={handle} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <label className="muted">Asset</label>
-          <select value={assetId} onChange={(e) => setAssetId(e.target.value)} required>
-            {accounts.map((a) => (
-              <option key={a.id} value={a.asset_id}>
-                {a.asset.display_symbol} — {a.asset.display_name}
-              </option>
-            ))}
-          </select>
+      {errorMsg && <FeedbackBanner type="error" message={errorMsg} />}
 
-          <label className="muted">Amount</label>
-          <select value={String(amount)} onChange={(e) => setAmount(parseInt(e.target.value, 10))}>
-            {[10, 20, 50, 100].map((x) => (
-              <option key={x} value={x}>
-                {x}
-              </option>
-            ))}
-          </select>
+      {step === "form" && (
+        <div className="card">
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="form-field">
+              <label className="form-label">Currency</label>
+              <select value={assetId} onChange={(e) => setAssetId(e.target.value)} required>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.asset_id}>
+                    {a.asset.display_symbol} &mdash; {a.asset.display_name}
+                  </option>
+                ))}
+              </select>
+              {selectedAcc && (
+                <span className="form-hint">Current balance: {formatMoney(selectedAcc.balance.available)} {selectedAcc.asset.display_symbol}</span>
+              )}
+            </div>
 
-          <label className="muted">Simulated card last4</label>
-          <input value={last4} onChange={(e) => setLast4(e.target.value)} maxLength={4} />
+            <div className="form-field">
+              <label className="form-label">Amount</label>
+              <select value={String(amount)} onChange={(e) => setAmount(parseInt(e.target.value, 10))}>
+                {[10, 20, 50, 100].map((x) => (
+                  <option key={x} value={x}>{x} {selectedAcc?.asset.display_symbol ?? ""}</option>
+                ))}
+              </select>
+            </div>
 
-          <button type="submit" disabled={loading}>
-            {loading ? "Processing…" : "Confirm Top Up"}
-          </button>
+            <div className="form-field">
+              <label className="form-label">Simulated card (last 4 digits)</label>
+              <input value={last4} onChange={(e) => setLast4(e.target.value)} maxLength={4} placeholder="e.g. 4242" />
+              <span className="form-hint">This is a simulated card top-up for demo purposes.</span>
+            </div>
 
-          {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
-          <p className="muted" style={{ marginTop: 4 }}>
-            Fee is applied by backend (you’ll see net credited).
-          </p>
-        </form>
-      </div>
+            {amount > 0 && (
+              <div className="confirm-panel" style={{ margin: 0 }}>
+                <ConfirmRow label="Gross amount" value={`${amount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+                <ConfirmRow label="Platform fee (1%)" value={`${feeCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+                <ConfirmRow label="You will receive" value={`${feeCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
+              </div>
+            )}
+
+            <button onClick={() => setStep("confirm")} disabled={!assetId || !amount}>
+              Review Top-up
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "confirm" && (
+        <div className="card">
+          <h3 style={{ marginBottom: 4, fontSize: "1rem" }}>Confirm Top-up</h3>
+          <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 14 }}>Please review the details before confirming.</p>
+          <div className="confirm-panel">
+            <ConfirmRow label="Currency" value={selectedAcc?.asset.display_name ?? assetId} />
+            <ConfirmRow label="Gross amount" value={`${amount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+            <ConfirmRow label="Platform fee (1%)" value={`${feeCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+            <ConfirmRow label="Amount credited" value={`${feeCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
+            <ConfirmRow label="Settlement" value={<span className="settle-tag">Internal balance</span>} />
+          </div>
+          <InlineHelp>Funds are added to your internal LumixPay balance. No blockchain transaction is required.</InlineHelp>
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            <button onClick={() => setStep("form")} style={{ background: "var(--surface)", border: "1px solid var(--border)", flex: 1 }}>
+              Edit
+            </button>
+            <button onClick={handleConfirm} disabled={loading} style={{ flex: 2 }}>
+              {loading ? "Processing..." : `Confirm - Add ${feeCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "success" && successData && (
+        <div className="card">
+          <div className="success-screen">
+            <div className="success-icon">&#10003;</div>
+            <div className="success-title">Top-up complete</div>
+            <div className="success-sub">
+              {successData.net} {successData.symbol} has been added to your LumixPay balance.
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button
+                onClick={() => { setStep("form"); setSuccessData(null); setErrorMsg(""); }}
+                style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
+              >
+                Top up again
+              </button>
+              <button onClick={() => navigate("/dashboard")}>Back to dashboard</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -604,115 +960,160 @@ function TransferPage() {
   const { addToast } = useToast();
   const navigate = useNavigate();
 
-  // Defaults: RLUSD asset + empty recipient
   const [assetId, setAssetId] = useState<string>("");
   const [toUserId, setToUserId] = useState<string>("");
   const [grossAmount, setGrossAmount] = useState<number>(10);
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [step, setStep] = useState<"form" | "confirm" | "success">("form");
+  const [successData, setSuccessData] = useState<{ net: string; symbol: string } | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
     const rlusd = getAccountBySymbol(accounts, "RLUSD");
     if (!assetId && rlusd?.asset_id) setAssetId(rlusd.asset_id);
   }, [accounts, assetId]);
 
-  const handle = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setMsg("");
+  const selectedAcc = accounts.find((a) => a.asset_id === assetId);
+  const xferCalc = calcFee(grossAmount);
+  const exceedsBalance = selectedAcc && grossAmount > parseFloat(String(selectedAcc.balance.available));
+
+  const handleConfirm = async () => {
+    setErrorMsg("");
     setLoading(true);
     try {
       const res = await apiFetch<any>("/transfers", token, {
         method: "POST",
-        body: JSON.stringify({
-          to_user_id: toUserId.trim(),
-          asset_id: assetId,
-          gross_amount: grossAmount,
-        }),
+        body: JSON.stringify({ to_user_id: toUserId.trim(), asset_id: assetId, gross_amount: grossAmount }),
       });
-      await refresh(); // ✅ auto-refresh balances
+      await refresh();
       void refreshNotifs();
-      setMsg(`Transfer completed ✅ (net ${res?.transfer?.net_amount ?? ""})`);
+      setSuccessData({ net: res?.transfer?.net_amount ?? xferCalc.net, symbol: selectedAcc?.asset.display_symbol ?? "" });
+      setStep("success");
       addToast("Transfer sent!", "success");
     } catch (err: any) {
-      setMsg(err.message ?? "Transfer failed");
-      addToast(err.message ?? "Transfer failed", "error");
+      const msg = friendlyError(err);
+      setErrorMsg(msg);
+      addToast(msg, "error");
+      setStep("form");
     } finally {
       setLoading(false);
     }
   };
 
-  const selectedAcc = accounts.find((a) => a.asset_id === assetId);
-  const xferCalc = calcFee(grossAmount);
-
   return (
-    <div style={{ maxWidth: 600, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2>Transfer</h2>
+    <div style={{ maxWidth: 540, margin: "0 auto", padding: "24px 16px" }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ marginBottom: 2 }}>Transfer</h2>
+          <p className="muted" style={{ fontSize: "0.78rem" }}>Send funds to another LumixPay user instantly</p>
+        </div>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
           Back
         </button>
       </header>
 
-      <div className="card">
-        <form onSubmit={handle} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <label className="muted">Asset</label>
-          <select value={assetId} onChange={(e) => setAssetId(e.target.value)} required>
-            {accounts.map((a) => (
-              <option key={a.id} value={a.asset_id}>
-                {a.asset.display_symbol}
-              </option>
-            ))}
-          </select>
+      {errorMsg && <FeedbackBanner type="error" message={errorMsg} />}
 
-          {selectedAcc && (
-            <p className="muted" style={{ marginTop: -4 }}>
-              Available:{" "}
-              <strong>
-                {formatMoney(selectedAcc.balance.available)} {selectedAcc.asset.display_symbol}
-              </strong>
-            </p>
-          )}
+      {step === "form" && (
+        <div className="card">
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="form-field">
+              <label className="form-label">Currency</label>
+              <select value={assetId} onChange={(e) => setAssetId(e.target.value)} required>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.asset_id}>{a.asset.display_symbol} &mdash; {a.asset.display_name}</option>
+                ))}
+              </select>
+              {selectedAcc && (
+                <span className="form-hint">Available: {formatMoney(selectedAcc.balance.available)} {selectedAcc.asset.display_symbol}</span>
+              )}
+            </div>
 
-          <label className="muted">Recipient user_id</label>
-          <input
-            placeholder="Paste recipient user_id (UUID)"
-            value={toUserId}
-            onChange={(e) => setToUserId(e.target.value)}
-            required
-          />
-          <p className="muted" style={{ marginTop: -6 }}>
-            (For now we use user_id directly. Later we can use email/handle lookup.)
-          </p>
+            <div className="form-field">
+              <label className="form-label">Recipient user ID</label>
+              <input
+                placeholder="Paste recipient user ID (UUID)"
+                value={toUserId}
+                onChange={(e) => setToUserId(e.target.value)}
+                required
+              />
+              <span className="form-hint">You can find someone's user ID on their profile page.</span>
+            </div>
 
-          <label className="muted">Gross amount</label>
-          <input
-            type="number"
-            min={0.01}
-            step="0.01"
-            value={grossAmount}
-            onChange={(e) => setGrossAmount(parseFloat(e.target.value))}
-            required
-          />
+            <div className="form-field">
+              <label className="form-label">Amount</label>
+              <input
+                type="number" min={0.01} step="0.01" value={grossAmount}
+                onChange={(e) => setGrossAmount(parseFloat(e.target.value))} required
+              />
+            </div>
 
-          {grossAmount > 0 && (
-            <p className="muted" style={{ fontSize: "0.82rem", marginTop: -4 }}>
-              Fee (1%): <strong>{xferCalc.fee}</strong> · Recipient receives:{" "}
-              <strong>{xferCalc.net}</strong>
-            </p>
-          )}
-          {selectedAcc && grossAmount > parseFloat(String(selectedAcc.balance.available)) && (
-            <p className="error" style={{ fontSize: "0.82rem" }}>
-              ⚠ Amount exceeds your available balance
-            </p>
-          )}
+            {grossAmount > 0 && (
+              <div className="confirm-panel" style={{ margin: 0 }}>
+                <ConfirmRow label="Gross amount" value={`${grossAmount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+                <ConfirmRow label="Platform fee (1%)" value={`${xferCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+                <ConfirmRow label="Recipient receives" value={`${xferCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
+              </div>
+            )}
 
-          <button type="submit" disabled={loading}>
-            {loading ? "Sending…" : "Send Transfer"}
-          </button>
+            {exceedsBalance && (
+              <FeedbackBanner type="error" message="Amount exceeds your available balance." />
+            )}
 
-          {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
-        </form>
-      </div>
+            <button
+              onClick={() => setStep("confirm")}
+              disabled={!assetId || !toUserId.trim() || grossAmount <= 0 || !!exceedsBalance}
+            >
+              Review Transfer
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "confirm" && (
+        <div className="card">
+          <h3 style={{ marginBottom: 4, fontSize: "1rem" }}>Confirm Transfer</h3>
+          <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 14 }}>Transfers are instant and cannot be reversed.</p>
+          <div className="confirm-panel">
+            <ConfirmRow label="Currency" value={selectedAcc?.asset.display_name ?? assetId} />
+            <ConfirmRow label="Recipient" value={<code style={{ fontSize: "0.77rem", wordBreak: "break-all" }}>{toUserId.trim()}</code>} />
+            <ConfirmRow label="Gross amount" value={`${grossAmount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+            <ConfirmRow label="Platform fee (1%)" value={`${xferCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+            <ConfirmRow label="Recipient receives" value={`${xferCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
+            <ConfirmRow label="Settlement" value={<span className="settle-tag">Internal</span>} />
+          </div>
+          <InlineHelp>This is an internal transfer between LumixPay accounts. It settles instantly with no blockchain transaction.</InlineHelp>
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            <button onClick={() => setStep("form")} style={{ background: "var(--surface)", border: "1px solid var(--border)", flex: 1 }}>
+              Edit
+            </button>
+            <button onClick={handleConfirm} disabled={loading} style={{ flex: 2 }}>
+              {loading ? "Sending..." : `Confirm - Send ${xferCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "success" && successData && (
+        <div className="card">
+          <div className="success-screen">
+            <div className="success-icon">&#10003;</div>
+            <div className="success-title">Transfer sent</div>
+            <div className="success-sub">
+              {successData.net} {successData.symbol} has been sent successfully.
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button
+                onClick={() => { setStep("form"); setSuccessData(null); setErrorMsg(""); setToUserId(""); setGrossAmount(10); }}
+                style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
+              >
+                Send again
+              </button>
+              <button onClick={() => navigate("/dashboard")}>Back to dashboard</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -730,19 +1131,24 @@ function WithdrawPage() {
 
   const [assetId, setAssetId] = useState<string>("");
   const [grossAmount, setGrossAmount] = useState<number>(5);
-  const [xrplAddress, setXrplAddress] = useState<string>("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
-  const [xrplTag, setXrplTag] = useState<string>(""); // optional
+  const [xrplAddress, setXrplAddress] = useState<string>("");
+  const [xrplTag, setXrplTag] = useState<string>("");
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [step, setStep] = useState<"form" | "confirm" | "submitted">("form");
+  const [withdrawalId, setWithdrawalId] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
     const rlusd = getAccountBySymbol(accounts, "RLUSD");
     if (!assetId && rlusd?.asset_id) setAssetId(rlusd.asset_id);
   }, [accounts, assetId]);
 
-  const handle = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setMsg("");
+  const selectedAcc = accounts.find((a) => a.asset_id === assetId);
+  const wCalc = calcFee(grossAmount);
+  const exceedsBalance = selectedAcc && grossAmount > parseFloat(String(selectedAcc.balance.available));
+
+  const handleConfirm = async () => {
+    setErrorMsg("");
     setLoading(true);
     try {
       const payload: any = {
@@ -752,102 +1158,162 @@ function WithdrawPage() {
       };
       const tagTrim = xrplTag.trim();
       if (tagTrim) payload.xrpl_destination_tag = Number(tagTrim);
-
-      const res = await apiFetch<any>("/withdrawals", token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-
-      await refresh(); // ✅ auto-refresh balances (available down, locked up)
+      const res = await apiFetch<any>("/withdrawals", token, { method: "POST", body: JSON.stringify(payload) });
+      await refresh();
       void refreshNotifs();
-      setMsg(`Withdrawal created ✅ (status ${res?.withdrawal?.status ?? "pending"})`);
+      setWithdrawalId(res?.withdrawal?.id ?? null);
+      setStep("submitted");
       addToast("Withdrawal request submitted", "info");
     } catch (err: any) {
-      setMsg(err.message ?? "Withdraw failed");
-      addToast(err.message ?? "Withdraw failed", "error");
+      const msg = friendlyError(err);
+      setErrorMsg(msg);
+      addToast(msg, "error");
+      setStep("form");
     } finally {
       setLoading(false);
     }
   };
 
-  const selectedWithdrawAcc = accounts.find((a) => a.asset_id === assetId);
-  const wCalc = calcFee(grossAmount);
-
   return (
-    <div style={{ maxWidth: 600, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2>Withdraw</h2>
+    <div style={{ maxWidth: 540, margin: "0 auto", padding: "24px 16px" }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ marginBottom: 2 }}>Withdraw</h2>
+          <p className="muted" style={{ fontSize: "0.78rem" }}>Send funds to an XRPL destination address</p>
+        </div>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
           Back
         </button>
       </header>
 
-      <div className="card">
-        <form onSubmit={handle} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <label className="muted">Asset</label>
-          <select value={assetId} onChange={(e) => setAssetId(e.target.value)} required>
-            {accounts.map((a) => (
-              <option key={a.id} value={a.asset_id}>
-                {a.asset.display_symbol}
-              </option>
-            ))}
-          </select>
+      {errorMsg && <FeedbackBanner type="error" message={errorMsg} />}
 
-          {selectedWithdrawAcc && (
-            <p className="muted" style={{ marginTop: -4 }}>
-              Available:{" "}
-              <strong>
-                {formatMoney(selectedWithdrawAcc.balance.available)} {selectedWithdrawAcc.asset.display_symbol}
-              </strong>
-              {parseFloat(String(selectedWithdrawAcc.balance.locked)) > 0 && (
-                <span> · Locked: {formatMoney(selectedWithdrawAcc.balance.locked)}</span>
+      {step === "form" && (
+        <div className="card">
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="form-field">
+              <label className="form-label">Currency</label>
+              <select value={assetId} onChange={(e) => setAssetId(e.target.value)} required>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.asset_id}>{a.asset.display_symbol} &mdash; {a.asset.display_name}</option>
+                ))}
+              </select>
+              {selectedAcc && (
+                <span className="form-hint">Available: {formatMoney(selectedAcc.balance.available)} {selectedAcc.asset.display_symbol}</span>
               )}
-            </p>
-          )}
+            </div>
 
-          <label className="muted">Gross amount</label>
-          <input
-            type="number"
-            min={0.01}
-            step="0.01"
-            value={grossAmount}
-            onChange={(e) => setGrossAmount(parseFloat(e.target.value))}
-            required
-          />
+            <div className="form-field">
+              <label className="form-label">Amount</label>
+              <input
+                type="number" min={0.01} step="0.01" value={grossAmount}
+                onChange={(e) => setGrossAmount(parseFloat(e.target.value))} required
+              />
+            </div>
 
-          {grossAmount > 0 && (
-            <p className="muted" style={{ fontSize: "0.82rem", marginTop: -4 }}>
-              Fee (1%): <strong>{wCalc.fee}</strong> · Net to lock in escrow:{" "}
-              <strong>{wCalc.net}</strong>
-            </p>
-          )}
-          {selectedWithdrawAcc && grossAmount > parseFloat(String(selectedWithdrawAcc.balance.available)) && (
-            <p className="error" style={{ fontSize: "0.82rem" }}>
-              ⚠ Amount exceeds your available balance
-            </p>
-          )}
+            {grossAmount > 0 && (
+              <div className="confirm-panel" style={{ margin: 0 }}>
+                <ConfirmRow label="Gross amount" value={`${grossAmount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+                <ConfirmRow label="Platform fee (1%)" value={`${wCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+                <ConfirmRow label="Net locked in escrow" value={`${wCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
+              </div>
+            )}
 
-          <label className="muted">XRPL destination address</label>
-          <input value={xrplAddress} onChange={(e) => setXrplAddress(e.target.value)} required />
+            {exceedsBalance && (
+              <FeedbackBanner type="error" message="Amount exceeds your available balance." />
+            )}
 
-          <label className="muted">Destination tag (optional)</label>
-          <input
-            placeholder="e.g. 12345"
-            value={xrplTag}
-            onChange={(e) => setXrplTag(e.target.value)}
-            inputMode="numeric"
-          />
+            <div className="form-field">
+              <label className="form-label">XRPL destination address</label>
+              <input value={xrplAddress} onChange={(e) => setXrplAddress(e.target.value)} required placeholder="r..." />
+            </div>
 
-          <button type="submit" disabled={loading}>
-            {loading ? "Submitting…" : "Create Withdrawal"}
-          </button>
+            <div className="form-field">
+              <label className="form-label">Destination tag <span style={{ fontWeight: 400, color: "var(--muted)" }}>(optional)</span></label>
+              <input placeholder="e.g. 12345" value={xrplTag} onChange={(e) => setXrplTag(e.target.value)} inputMode="numeric" />
+              <span className="form-hint">Required by some exchanges (e.g. Bitso, Kraken). Check with your destination before sending.</span>
+            </div>
 
-          {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
-          <p className="muted" style={{ marginTop: 4 }}>
-            After creation, net is locked and moved to escrow until admin review.
+            <button
+              onClick={() => setStep("confirm")}
+              disabled={!assetId || !xrplAddress.trim() || grossAmount <= 0 || !!exceedsBalance}
+            >
+              Review Withdrawal
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "confirm" && (
+        <div className="card">
+          <h3 style={{ marginBottom: 4, fontSize: "1rem" }}>Confirm Withdrawal</h3>
+          <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 14 }}>
+            Verify the destination address carefully. Withdrawals cannot be reversed once approved.
           </p>
-        </form>
-      </div>
+          <div className="confirm-panel">
+            <ConfirmRow label="Currency" value={selectedAcc?.asset.display_name ?? assetId} />
+            <ConfirmRow label="Gross amount" value={`${grossAmount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+            <ConfirmRow label="Platform fee (1%)" value={`${wCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
+            <ConfirmRow label="Net to escrow" value={`${wCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
+            <ConfirmRow label="Destination" value={<code style={{ fontSize: "0.75rem", wordBreak: "break-all" }}>{xrplAddress.trim()}</code>} />
+            {xrplTag.trim() && <ConfirmRow label="Destination tag" value={xrplTag.trim()} />}
+            <ConfirmRow label="Settlement" value={<span className="settle-tag on-chain">XRPL (Phase 2)</span>} />
+          </div>
+          <InlineHelp>Net amount is locked in escrow. A LumixPay operator will review and approve before on-chain settlement.</InlineHelp>
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            <button onClick={() => setStep("form")} style={{ background: "var(--surface)", border: "1px solid var(--border)", flex: 1 }}>
+              Edit
+            </button>
+            <button onClick={handleConfirm} disabled={loading} style={{ flex: 2 }}>
+              {loading ? "Submitting..." : "Confirm Withdrawal Request"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "submitted" && (
+        <div className="card">
+          <div className="success-screen" style={{ paddingBottom: 8 }}>
+            <div className="success-icon" style={{ background: "color-mix(in srgb,#3b82f6 14%,var(--surface))", fontSize: "1.3rem" }}>&#128336;</div>
+            <div className="success-title">Withdrawal request submitted</div>
+            <div className="success-sub">Your funds are locked in escrow and awaiting admin review.</div>
+          </div>
+          <div className="tx-timeline">
+            <div className="tx-step done">
+              <div>
+                <div className="tx-step-label">Request received</div>
+                <div className="tx-step-sub">Net amount locked in escrow pending review</div>
+              </div>
+            </div>
+            <div className="tx-step active">
+              <div>
+                <div className="tx-step-label">Admin review</div>
+                <div className="tx-step-sub">A LumixPay operator will approve or reject your request</div>
+              </div>
+            </div>
+            <div className="tx-step">
+              <div>
+                <div className="tx-step-label">On-chain settlement</div>
+                <div className="tx-step-sub">Approved withdrawals settle to your XRPL address (Phase 2)</div>
+              </div>
+            </div>
+          </div>
+          {withdrawalId && (
+            <p className="muted" style={{ fontSize: "0.72rem", marginTop: 12, textAlign: "center" }}>
+              Reference: <code>{withdrawalId}</code>
+            </p>
+          )}
+          <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "center" }}>
+            <button onClick={() => navigate("/dashboard")}>Back to dashboard</button>
+            <button
+              onClick={() => { setStep("form"); setWithdrawalId(null); setErrorMsg(""); }}
+              style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
+            >
+              New withdrawal
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -857,12 +1323,30 @@ function WithdrawPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ENTRY_LABEL: Record<string, string> = {
-  topup: "Top Up",
-  transfer: "Transfer",
-  fee: "Fee",
-  withdrawal_lock: "Withdrawal Lock",
-  withdrawal_unlock: "Withdrawal Unlock",
-  withdrawal_settle: "Withdrawal Settle",
+  topup:              "Top Up",
+  transfer:           "Transfer",
+  fee:                "Platform fee",
+  withdrawal_lock:    "Withdrawal (pending)",
+  withdrawal_unlock:  "Withdrawal cancelled",
+  withdrawal_settle:  "Withdrawal settled",
+  fx_conversion:      "Currency exchange",
+  voucher_redeem:     "Voucher redeemed",
+  voucher_purchase:   "Voucher purchased",
+  payment_link_claim: "Payment received",
+  recurring:          "Recurring payment",
+};
+const ENTRY_ICON: Record<string, string> = {
+  topup:              "⬇",
+  transfer:           "↗",
+  fee:                "·",
+  withdrawal_lock:    "🔒",
+  withdrawal_unlock:  "🔓",
+  withdrawal_settle:  "✓",
+  fx_conversion:      "⇌",
+  voucher_redeem:     "🎟",
+  voucher_purchase:   "🎟",
+  payment_link_claim: "💳",
+  recurring:          "↻",
 };
 
 function HistoryPage() {
@@ -920,32 +1404,35 @@ function HistoryPage() {
         </select>
       </div>
 
-      {loading && <p className="muted">Loading…</p>}
-      {error && <p className="error">{error}</p>}
+      {loading && <SkeletonLoader rows={5} widths={[100,100,100,100,100]} />}
+      {error && <FeedbackBanner type="error" message={error} />}
       {!loading && !error && entries.length === 0 && (
-        <p className="muted">No transactions yet for this account.</p>
+        <p className="muted" style={{ padding: "12px 0" }}>No transactions recorded for this account yet.</p>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div className="tx-list-scroll" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {entries.map((e) => {
           const incoming = e.credit_account_id === accountId;
           const sign = incoming ? "+" : "−";
           const color = incoming ? "var(--success)" : "var(--muted)";
+          const icon = ENTRY_ICON[e.entry_type] ?? "·";
           return (
             <div
               key={e.id}
               className="card"
-              style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+              style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}
             >
-              <div>
-                <p style={{ fontWeight: 600, fontSize: "0.95rem" }}>
-                  {ENTRY_LABEL[e.entry_type] ?? e.entry_type}
-                </p>
-                <p className="muted">{new Date(e.created_at).toLocaleString()}</p>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.9rem", flexShrink: 0 }}>{icon}</span>
+                <div>
+                  <p style={{ fontWeight: 600, fontSize: "0.9rem" }}>
+                    {ENTRY_LABEL[e.entry_type] ?? e.entry_type}
+                  </p>
+                  <p className="muted" style={{ fontSize: "0.73rem" }}>{new Date(e.created_at).toLocaleString()}</p>
+                </div>
               </div>
-              <p style={{ fontWeight: 700, fontSize: "1.05rem", color }}>
-                {sign}
-                {formatMoney(e.amount)} {selectedAcc?.asset.display_symbol ?? ""}
+              <p style={{ fontWeight: 700, fontSize: "1rem", color, flexShrink: 0 }}>
+                {sign}{formatMoney(e.amount)} <span style={{ fontSize: "0.78rem", fontWeight: 600 }}>{selectedAcc?.asset.display_symbol ?? ""}</span>
               </p>
             </div>
           );
@@ -1188,12 +1675,17 @@ function AdminWithdrawalsPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function NotificationsPage() {
+  const { token } = useAuth();
   const { notifications, unreadCount, refresh, markAllRead } = useNotifications();
   const navigate = useNavigate();
+  const { addToast } = useToast();
+  const [pushStatus, setPushStatus] = useState<PushUiStatus>("DISABLED");
+  const [pushWorking, setPushWorking] = useState(false);
 
   // Auto-mark all as read when inbox opens
   useEffect(() => {
     if (unreadCount > 0) void markAllRead();
+    void getPushStatus().then(setPushStatus).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1243,6 +1735,64 @@ function NotificationsPage() {
         </div>
       </header>
 
+      {/* Push status (user-triggered; no auto-permission request) */}
+      <div className="card" style={{ marginBottom: 14, padding: "14px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>Push notifications</div>
+            <div className="muted" style={{ fontSize: "0.82rem", lineHeight: 1.5 }}>
+              Status:{" "}
+              <strong>
+                {pushStatus === "ENABLED"
+                  ? "Enabled"
+                  : pushStatus === "DISABLED"
+                  ? "Disabled"
+                  : pushStatus === "BLOCKED"
+                  ? "Browser blocked"
+                  : pushStatus === "PERMISSION_REQUIRED"
+                  ? "Permission required"
+                  : "Unsupported"}
+              </strong>
+            </div>
+          </div>
+          {"Notification" in window && "serviceWorker" in navigator ? (
+            <button
+              disabled={pushWorking || !token || pushStatus === "UNSUPPORTED"}
+              onClick={async () => {
+                if (!token) return;
+                setPushWorking(true);
+                try {
+                  if (pushStatus === "ENABLED") {
+                    await unsubscribeFromPush(token);
+                    setPushStatus("DISABLED");
+                    addToast("Push notifications disabled", "info");
+                  } else {
+                    const ok = await subscribeToPush(token);
+                    if (ok) {
+                      setPushStatus("ENABLED");
+                      addToast("Push notifications enabled", "success");
+                    } else {
+                      setPushStatus(Notification.permission === "denied" ? "BLOCKED" : "PERMISSION_REQUIRED");
+                      addToast("Push permission was not granted", "info");
+                    }
+                  }
+                } catch (e: any) {
+                  addToast(e?.message ?? "Push setup failed", "error");
+                } finally {
+                  setPushWorking(false);
+                }
+              }}
+              style={{ whiteSpace: "nowrap" }}
+            >
+              {pushWorking ? "Working…" : pushStatus === "ENABLED" ? "Disable Push" : "Enable Push"}
+            </button>
+          ) : null}
+        </div>
+        <p className="muted" style={{ fontSize: "0.75rem", marginTop: 10, marginBottom: 0 }}>
+          Push is always user-enabled. If your browser blocks notifications, enable them in site settings and try again.
+        </p>
+      </div>
+
       {notifications.length === 0 && (
         <div className="card" style={{ textAlign: "center", padding: 40 }}>
           <p className="muted">No notifications yet.</p>
@@ -1281,20 +1831,43 @@ function NotificationsPage() {
 // Phase 4: Profile page
 // ─────────────────────────────────────────────────────────────────────────────
 
+type WalletChallenge = {
+  challenge_id: string;
+  message: string;
+  expires_at: string;
+  network: string;
+  xrpl_testnet_json_rpc: string;
+  xrpl_testnet_wss: string;
+};
+
 function ProfilePage() {
-  const { token, user } = useAuth();
+  const { token } = useAuth();
   const navigate = useNavigate();
   const [profile, setProfile] = useState<any>(null);
   const [username, setUsername] = useState("");
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const [challenge, setChallenge] = useState<WalletChallenge | null>(null);
+  const [wAddress, setWAddress] = useState("");
+  const [wPub, setWPub] = useState("");
+  const [wSig, setWSig] = useState("");
+  const [walletOp, setWalletOp] = useState<null | "challenge" | "link" | "disconnect">(null);
+  const [walletMsg, setWalletMsg] = useState("");
+
+  const loadProfile = useCallback(() => {
     if (!token) return;
-    apiFetch<{ profile: any }>("/me/profile", token)
-      .then((d) => { setProfile(d.profile); setUsername(d.profile.username ?? ""); })
+    void apiFetch<{ profile: any }>("/me/profile", token)
+      .then((d) => {
+        setProfile(d.profile);
+        setUsername(d.profile.username ?? "");
+      })
       .catch(() => {});
   }, [token]);
+
+  useEffect(() => {
+    loadProfile();
+  }, [loadProfile]);
 
   const saveUsername = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1306,6 +1879,69 @@ function ProfilePage() {
     } catch (err: any) { setMsg(err.message ?? "Failed"); }
     finally { setLoading(false); }
   };
+
+  const requestWalletChallenge = async () => {
+    if (!token) return;
+    setWalletMsg("");
+    setWalletOp("challenge");
+    try {
+      const d = await apiFetch<WalletChallenge>("/me/profile/wallet/challenge", token, { method: "POST" });
+      setChallenge(d);
+      setWAddress("");
+      setWPub("");
+      setWSig("");
+    } catch (e: any) {
+      setWalletMsg(friendlyError(e));
+    } finally {
+      setWalletOp(null);
+    }
+  };
+
+  const linkWallet = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !challenge) return;
+    setWalletMsg("");
+    setWalletOp("link");
+    try {
+      await apiFetch("/me/profile/wallet", token, {
+        method: "PATCH",
+        body: JSON.stringify({
+          challenge_id: challenge.challenge_id,
+          address: wAddress.trim(),
+          public_key: wPub.trim(),
+          signature: wSig.trim().replace(/\s+/g, ""),
+        }),
+      });
+      setChallenge(null);
+      setWAddress("");
+      setWPub("");
+      setWSig("");
+      loadProfile();
+      setWalletMsg("");
+    } catch (e: any) {
+      setWalletMsg(friendlyError(e));
+    } finally {
+      setWalletOp(null);
+    }
+  };
+
+  const disconnectWallet = async () => {
+    if (!token) return;
+    setWalletMsg("");
+    setWalletOp("disconnect");
+    try {
+      await apiFetch("/me/profile/wallet", token, { method: "DELETE" });
+      setChallenge(null);
+      loadProfile();
+      setWalletMsg("");
+    } catch (e: any) {
+      setWalletMsg(friendlyError(e));
+    } finally {
+      setWalletOp(null);
+    }
+  };
+
+  const hasWallet = Boolean(profile?.xrpl_address);
 
   return (
     <div style={{ maxWidth: 600, margin: "0 auto", padding: "24px 16px" }}>
@@ -1336,6 +1972,92 @@ function ProfilePage() {
           <button type="submit" disabled={loading}>{loading ? "…" : "Save"}</button>
         </form>
         {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+        <h3 style={{ margin: 0, fontSize: "1.05rem" }}>XRPL wallet (optional)</h3>
+        <p className="muted" style={{ margin: 0, fontSize: "0.88rem", lineHeight: 1.5 }}>
+          Your LumixPay account stays primary (email and password). Optional: connect an XRPL Testnet wallet for future on-chain settlement and withdrawal flows.
+        </p>
+
+        {hasWallet ? (
+          <>
+            <p style={{ margin: 0, lineHeight: 1.5 }}>
+              <span className="muted">Connected XRPL wallet:</span>{" "}
+              <code style={{ fontSize: "0.82rem", wordBreak: "break-all" }}>{profile.xrpl_address}</code>
+              <CopyButton text={profile.xrpl_address} style={{ marginLeft: 8 }} />
+            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              <span className="muted">Network:</span>
+              <code className="muted" style={{ fontSize: "0.82rem" }}>xrpl_testnet</code>
+              <span className="status-badge badge-active">XRPL Testnet</span>
+            </div>
+            {profile.xrpl_verified_at && (
+              <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
+                Verified: {new Date(profile.xrpl_verified_at).toLocaleString()}
+              </p>
+            )}
+            <button type="button" onClick={() => void disconnectWallet()} disabled={walletOp !== null} style={{ alignSelf: "flex-start" }}>
+              {walletOp === "disconnect" ? "Disconnecting…" : "Disconnect"}
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="muted" style={{ margin: 0, fontSize: "0.82rem", lineHeight: 1.45 }}>
+              Sign the challenge with your Testnet account key (e.g. <code>ripple-keypairs</code> <code>sign(messageHex, privateKey)</code>). The server checks your signature against the address on XRPL Testnet.
+            </p>
+            <button type="button" onClick={() => void requestWalletChallenge()} disabled={walletOp !== null}>
+              {walletOp === "challenge" ? "Loading…" : "Get verification message"}
+            </button>
+            {challenge && (
+              <form onSubmit={linkWallet} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <p className="muted" style={{ margin: 0, fontSize: "0.78rem" }}>
+                  Expires: {new Date(challenge.expires_at).toLocaleString()}
+                </p>
+                <label className="muted" style={{ fontSize: "0.82rem" }}>Challenge message (read-only)</label>
+                <textarea
+                  readOnly
+                  value={challenge.message}
+                  rows={8}
+                  style={{ width: "100%", fontSize: "0.78rem", fontFamily: "inherit", resize: "vertical", background: "var(--surface)" }}
+                />
+                <div>
+                  <CopyButton text={challenge.message} label="Copy message" style={{ marginLeft: 0 }} />
+                </div>
+                <label className="muted" style={{ fontSize: "0.82rem" }}>XRPL address</label>
+                <input
+                  placeholder="Classic address (r…)"
+                  value={wAddress}
+                  onChange={(e) => setWAddress(e.target.value)}
+                  autoComplete="off"
+                  required
+                />
+                <label className="muted" style={{ fontSize: "0.82rem" }}>Public key</label>
+                <input
+                  placeholder="Hex public key (ED… or 02/03…)"
+                  value={wPub}
+                  onChange={(e) => setWPub(e.target.value)}
+                  autoComplete="off"
+                  required
+                />
+                <label className="muted" style={{ fontSize: "0.82rem" }}>Signature</label>
+                <input
+                  placeholder="Hex signature from ripple-keypairs sign()"
+                  value={wSig}
+                  onChange={(e) => setWSig(e.target.value)}
+                  autoComplete="off"
+                  required
+                />
+                <button type="submit" disabled={walletOp !== null}>
+                  {walletOp === "link" ? "Linking…" : "Link wallet"}
+                </button>
+              </form>
+            )}
+          </>
+        )}
+        {walletMsg ? (
+          <p className="error" style={{ margin: 0 }}>{walletMsg}</p>
+        ) : null}
       </div>
     </div>
   );
@@ -1637,9 +2359,9 @@ function VouchersPage() {
       const d = await apiFetch<{ ok: boolean; credited: string }>("/vouchers/redeem", token, {
         method: "POST", body: JSON.stringify({ code }),
       });
-      setRedeemMsg(`Redeemed ✅ – ${d.credited} credited`);
+      setRedeemMsg(`Redeemed successfully — ${d.credited} credited to your balance`);
       setCode(""); void refresh(); void loadMine();
-    } catch (err: any) { setRedeemMsg(err.message ?? "Redemption failed"); }
+    } catch (err: any) { setRedeemMsg(friendlyError(err)); }
     finally { setRedeemLoading(false); }
   };
 
@@ -1649,9 +2371,9 @@ function VouchersPage() {
       const d = await apiFetch<{ voucher: any; code: string }>("/vouchers/purchase", token, {
         method: "POST", body: JSON.stringify({ product_id: productId }),
       });
-      setNewCode(d.code); setBuyMsg("Purchased ✅");
+      setNewCode(d.code); setBuyMsg("Voucher purchased successfully. Your code is ready to use or share.");
       void refresh(); void loadMine();
-    } catch (err: any) { setBuyMsg(err.message ?? "Purchase failed"); }
+    } catch (err: any) { setBuyMsg(friendlyError(err)); }
     finally { setBuyLoading(null); }
   };
 
@@ -1686,8 +2408,13 @@ function VouchersPage() {
               style={{ fontFamily: "monospace", letterSpacing: "0.1em", textTransform: "uppercase" }}
               required
             />
-            <button type="submit" disabled={redeemLoading}>{redeemLoading ? "Redeeming…" : "Redeem"}</button>
-            {redeemMsg && <p className={redeemMsg.includes("✅") ? "muted" : "error"}>{redeemMsg}</p>}
+            <button type="submit" disabled={redeemLoading}>{redeemLoading ? "Redeeming..." : "Redeem Voucher"}</button>
+            {redeemMsg && (
+              <FeedbackBanner
+                type={redeemMsg.includes("Redeemed") ? "success" : "error"}
+                message={redeemMsg.replace(" ✅", "").replace("✅", "").trim()}
+              />
+            )}
           </form>
         </div>
       )}
@@ -1702,7 +2429,12 @@ function VouchersPage() {
               <p className="muted" style={{ fontSize: "0.78rem", marginTop: 8 }}>Balance deducted. You can redeem or share this code.</p>
             </div>
           )}
-          {buyMsg && <p className={buyMsg.includes("✅") ? "muted" : "error"} style={{ marginBottom: 12 }}>{buyMsg}</p>}
+          {buyMsg && (
+            <FeedbackBanner
+              type={buyMsg.includes("Purchased") ? "success" : "error"}
+              message={buyMsg.replace(" ✅", "").replace("✅", "").trim()}
+            />
+          )}
           {Object.entries(productsByAsset).map(([symbol, prods]) => (
             <div key={symbol} style={{ marginBottom: 20 }}>
               <h4 style={{ marginBottom: 10, color: "var(--muted)", fontSize: "0.82rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>{symbol} Vouchers</h4>
@@ -1746,9 +2478,7 @@ function VouchersPage() {
                 <p className="muted">{v.display_symbol} · {formatMoney(v.gross_amount)}</p>
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: "0.75rem", background: v.status === "active" ? "var(--success)" : "var(--border)", color: "#fff" }}>
-                  {v.status}
-                </span>
+                <StatusBadge status={v.status} />
                 <CopyButton text={v.code} />
               </div>
             </div>
@@ -2408,8 +3138,11 @@ function ExchangePage() {
   const [toAssetId, setToAssetId] = useState("");
   const [amount, setAmount] = useState("10");
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [step, setStep] = useState<"form" | "confirm" | "success">("form");
+  const [successMsg, setSuccessMsg] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
   const [estimate, setEstimate] = useState<string | null>(null);
+  const [estimateRaw, setEstimateRaw] = useState<{ est: string; toSymbol: string } | null>(null);
 
   useEffect(() => {
     apiFetch<{ rates: any[] }>("/fx-rates/all", token)
@@ -2426,101 +3159,156 @@ function ExchangePage() {
     }
   }, [accounts, fromAssetId, toAssetId]);
 
-  // Compute live estimate
   useEffect(() => {
-    if (!fromAssetId || !toAssetId || !amount || fromAssetId === toAssetId) return setEstimate(null);
-    const rate = rates.find(
-      (r) => r.base_asset_id === fromAssetId && r.quote_asset_id === toAssetId
-    );
-    if (!rate) return setEstimate(null);
+    if (!fromAssetId || !toAssetId || !amount || fromAssetId === toAssetId) {
+      setEstimate(null); setEstimateRaw(null); return;
+    }
+    const rate = rates.find((r) => r.base_asset_id === fromAssetId && r.quote_asset_id === toAssetId);
+    if (!rate) { setEstimate(null); setEstimateRaw(null); return; }
     const est = (parseFloat(amount) * parseFloat(rate.rate)).toFixed(2);
     const toSymbol = accounts.find((a) => a.asset_id === toAssetId)?.asset.display_symbol ?? "";
-    setEstimate(`≈ ${est} ${toSymbol}`);
+    setEstimate(`~${est} ${toSymbol}`);
+    setEstimateRaw({ est, toSymbol });
   }, [fromAssetId, toAssetId, amount, rates, accounts]);
 
-  const convert = async (e: React.FormEvent) => {
-    e.preventDefault(); setMsg(""); setLoading(true);
+  const handleConvert = async () => {
+    setErrorMsg(""); setLoading(true);
     try {
       const d = await apiFetch<{ conversion: any }>("/convert", token, {
         method: "POST",
-        body: JSON.stringify({
-          from_asset_id: fromAssetId,
-          to_asset_id: toAssetId,
-          amount: parseFloat(amount),
-        }),
+        body: JSON.stringify({ from_asset_id: fromAssetId, to_asset_id: toAssetId, amount: parseFloat(amount) }),
       });
       await refresh();
-      setMsg(`Converted ✅ ${d.conversion.from_amount} ${d.conversion.from_code} → ${d.conversion.to_amount} ${d.conversion.to_code}`);
-    } catch (err: any) { setMsg(err.message ?? "Conversion failed"); }
-    finally { setLoading(false); }
+      setSuccessMsg(`${d.conversion.from_amount} ${d.conversion.from_code} converted to ${d.conversion.to_amount} ${d.conversion.to_code}`);
+      setStep("success");
+    } catch (err: any) {
+      const msg = friendlyError(err);
+      setErrorMsg(msg);
+      setStep("form");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const fromAcc = accounts.find((a) => a.asset_id === fromAssetId);
+  const fromSymbol = fromAcc?.asset.display_symbol ?? "";
+  const exceedsBalance = fromAcc && parseFloat(amount) > parseFloat(String(fromAcc.balance.available));
 
   return (
     <div style={{ maxWidth: 520, margin: "0 auto", padding: "24px 16px" }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h2>Currency Exchange</h2>
+        <div>
+          <h2 style={{ marginBottom: 2 }}>Currency Exchange</h2>
+          <p className="muted" style={{ fontSize: "0.78rem" }}>Convert between RLUSD and EURQ at current rates</p>
+        </div>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>Back</button>
       </header>
 
-      <div className="card">
-        <form onSubmit={convert} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <label className="muted">From</label>
-            <select value={fromAssetId} onChange={(e) => setFromAssetId(e.target.value)} required style={{ marginTop: 4 }}>
-              {accounts.map((a) => (
-                <option key={a.id} value={a.asset_id}>
-                  {a.asset.display_symbol} — {formatMoney(a.balance.available)} available
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="muted">Amount</label>
-            <input
-              type="number" min="0.01" step="0.01" value={amount}
-              onChange={(e) => setAmount(e.target.value)} required style={{ marginTop: 4 }}
-            />
-            {fromAcc && parseFloat(amount) > parseFloat(String(fromAcc.balance.available)) && (
-              <p className="error" style={{ fontSize: "0.82rem", marginTop: 4 }}>⚠ Exceeds available balance</p>
-            )}
-          </div>
-          <div>
-            <label className="muted">To</label>
-            <select value={toAssetId} onChange={(e) => setToAssetId(e.target.value)} required style={{ marginTop: 4 }}>
-              {accounts.filter((a) => a.asset_id !== fromAssetId).map((a) => (
-                <option key={a.id} value={a.asset_id}>{a.asset.display_symbol}</option>
-              ))}
-            </select>
-          </div>
-          {estimate && (
-            <p style={{ textAlign: "center", fontWeight: 700, fontSize: "1.2rem", color: "var(--accent)" }}>
-              {estimate}
-            </p>
-          )}
-          {!estimate && fromAssetId && toAssetId && fromAssetId !== toAssetId && (
-            <p className="muted" style={{ textAlign: "center", fontSize: "0.82rem" }}>Rate not available for this pair</p>
-          )}
-          <button type="submit" disabled={loading || fromAssetId === toAssetId || !estimate}>
-            {loading ? "Converting…" : "Convert"}
-          </button>
-          {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
-        </form>
-      </div>
+      {errorMsg && <FeedbackBanner type="error" message={errorMsg} />}
 
-      {rates.length > 0 && (
+      {step === "form" && (
+        <div className="card">
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="form-field">
+              <label className="form-label">From</label>
+              <select value={fromAssetId} onChange={(e) => setFromAssetId(e.target.value)} required>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.asset_id}>
+                    {a.asset.display_symbol} &mdash; {formatMoney(a.balance.available)} available
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Amount</label>
+              <input
+                type="number" min="0.01" step="0.01" value={amount}
+                onChange={(e) => setAmount(e.target.value)} required
+              />
+              {exceedsBalance && (
+                <span className="form-hint" style={{ color: "#f87171" }}>Exceeds your available balance</span>
+              )}
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">To</label>
+              <select value={toAssetId} onChange={(e) => setToAssetId(e.target.value)} required>
+                {accounts.filter((a) => a.asset_id !== fromAssetId).map((a) => (
+                  <option key={a.id} value={a.asset_id}>{a.asset.display_symbol}</option>
+                ))}
+              </select>
+            </div>
+
+            {estimate && (
+              <div className="confirm-panel" style={{ margin: 0 }}>
+                <ConfirmRow label="You send" value={`${amount} ${fromSymbol}`} />
+                <ConfirmRow label="You receive" value={estimate} highlight />
+              </div>
+            )}
+            {!estimate && fromAssetId && toAssetId && fromAssetId !== toAssetId && (
+              <FeedbackBanner type="warning" message="No exchange rate available for this pair." />
+            )}
+
+            <button
+              onClick={() => setStep("confirm")}
+              disabled={fromAssetId === toAssetId || !estimate || !!exceedsBalance}
+            >
+              Review Exchange
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "confirm" && estimateRaw && (
+        <div className="card">
+          <h3 style={{ marginBottom: 4, fontSize: "1rem" }}>Confirm Exchange</h3>
+          <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 14 }}>Rate may vary slightly at execution time.</p>
+          <div className="confirm-panel">
+            <ConfirmRow label="You send" value={`${amount} ${fromSymbol}`} />
+            <ConfirmRow label="You receive (~)" value={`${estimateRaw.est} ${estimateRaw.toSymbol}`} highlight />
+            <ConfirmRow label="Settlement" value={<span className="settle-tag">Internal</span>} />
+          </div>
+          <InlineHelp>This is an internal conversion between your LumixPay accounts. It settles instantly.</InlineHelp>
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            <button onClick={() => setStep("form")} style={{ background: "var(--surface)", border: "1px solid var(--border)", flex: 1 }}>
+              Edit
+            </button>
+            <button onClick={handleConvert} disabled={loading} style={{ flex: 2 }}>
+              {loading ? "Converting..." : "Confirm Exchange"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "success" && (
+        <div className="card">
+          <div className="success-screen">
+            <div className="success-icon">&#10003;</div>
+            <div className="success-title">Conversion complete</div>
+            <div className="success-sub">{successMsg}</div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button onClick={() => { setStep("form"); setSuccessMsg(""); setErrorMsg(""); }} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+                Convert again
+              </button>
+              <button onClick={() => navigate("/dashboard")}>Back to dashboard</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {rates.length > 0 && step === "form" && (
         <div className="card" style={{ marginTop: 16 }}>
-          <h4 style={{ marginBottom: 12, color: "var(--muted)", fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          <h4 style={{ marginBottom: 12, color: "var(--muted)", fontSize: "0.75rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>
             Current Rates
           </h4>
           {rates.map((r) => (
-            <div key={r.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--border)", fontSize: "0.88rem" }}>
-              <span className="muted">1 {r.base_symbol} →</span>
+            <div key={r.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid var(--border)", fontSize: "0.875rem" }}>
+              <span className="muted">1 {r.base_symbol}</span>
               <strong>{parseFloat(r.rate).toFixed(6)} {r.quote_symbol}</strong>
             </div>
           ))}
-          <p className="muted" style={{ fontSize: "0.72rem", marginTop: 8 }}>Rates are set by admin</p>
+          <p className="muted" style={{ fontSize: "0.72rem", marginTop: 10 }}>Rates are set by admin and may update periodically.</p>
         </div>
       )}
     </div>
@@ -2893,6 +3681,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const { user, logout, token } = useAuth();
   const { unreadCount, setUnreadFromSSE, setSseActive } = useNotifications();
   const { setAccountsFromSSE } = useBalances();
+  const { addToast } = useToast();
   const { pathname } = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -2900,6 +3689,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [showIosModal, setShowIosModal] = useState(false);
   const [pushOn, setPushOn] = useState(pushEnabled);
   const [pushLoading, setPushLoading] = useState(false);
+  const [pushStatus, setPushStatus] = useState<PushUiStatus>("DISABLED");
 
   // Close mobile nav on route change
   useEffect(() => { setMobileOpen(false); }, [pathname]);
@@ -2914,6 +3704,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
       window.removeEventListener("pwa-install-available", onAvailable);
       window.removeEventListener("pwa-installed", onInstalled);
     };
+  }, []);
+
+  // Initial push status resolution (permission + actual subscription)
+  useEffect(() => {
+    void getPushStatus()
+      .then((s) => { setPushStatus(s); setPushOn(s === "ENABLED"); })
+      .catch(() => {});
   }, []);
 
   // ── Real-time SSE wiring ───────────────────────────────────────────────────
@@ -2973,6 +3770,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         <nav className="sb-nav">
           <div className="sb-section-label">MAIN</div>
           <NavItem to="/dashboard"  icon="⊞"  label="Dashboard" />
+          <NavItem to="/profile"    icon="👤" label="Profile" />
           <NavItem to="/topup"      icon="💳" label="Top Up" />
           <NavItem to="/transfer"   icon="↗"  label="Transfer" />
           <NavItem to="/withdraw"   icon="↙"  label="Withdraw" />
@@ -3026,12 +3824,23 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   if (pushOn) {
                     await unsubscribeFromPush(token ?? "");
                     setPushOn(false);
+                    setPushStatus("DISABLED");
+                    addToast("Push notifications disabled", "info");
                   } else {
                     const ok = await subscribeToPush(token ?? "");
-                    if (ok) setPushOn(true);
+                    if (ok) {
+                      setPushOn(true);
+                      setPushStatus("ENABLED");
+                      addToast("Push notifications enabled", "success");
+                    } else {
+                      const status = Notification.permission === "denied" ? "BLOCKED" : "PERMISSION_REQUIRED";
+                      setPushStatus(status);
+                      addToast("Push permission was not granted", "info");
+                    }
                   }
                 } catch (e: any) {
                   console.error("Push toggle error:", e);
+                  addToast(e?.message ?? "Push setup failed", "error");
                 } finally {
                   setPushLoading(false);
                 }
@@ -3121,7 +3930,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { token } = useAuth();
+  const { token, ready } = useAuth();
+  if (!ready) return null;
   return token ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
@@ -3130,16 +3940,17 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
  * performed the initial balances fetch (or determined the user is logged out).
  */
 function AppBoot({ children }: { children: React.ReactNode }) {
-  const { token } = useAuth();
+  const { token, ready } = useAuth();
   const { loading: balancesLoading } = useBalances();
   // Show overlay on first paint while token is present and balances haven't loaded yet
   const [booting, setBooting] = React.useState(true);
 
   React.useEffect(() => {
     // If there's no token we're done immediately; if token exists wait for balances
+    if (!ready) { setBooting(true); return; }
     if (!token) { setBooting(false); return; }
     if (!balancesLoading) { setBooting(false); }
-  }, [token, balancesLoading]);
+  }, [token, balancesLoading, ready]);
 
   return (
     <>
@@ -3212,10 +4023,12 @@ export default function App() {
               <Route path="/admin/developers"  element={<Shell><AdminDevelopersPage /></Shell>} />
 
               {/* ── Public marketing pages ── */}
-              <Route path="/"           element={<LandingPage />} />
-              <Route path="/pricing"    element={<PricingPage />} />
-              <Route path="/developers" element={<DevelopersPage />} />
-              <Route path="/docs"       element={<DocsPage />} />
+              <Route path="/"             element={<LandingPage />} />
+              <Route path="/pricing"      element={<PricingPage />} />
+              <Route path="/developers"   element={<DevelopersPage />} />
+              <Route path="/docs"         element={<DocsPage />} />
+              <Route path="/demo"         element={<DemoPage />} />
+              <Route path="/architecture" element={<ArchitecturePage />} />
 
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

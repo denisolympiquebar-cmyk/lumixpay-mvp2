@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authenticate, requireRole } from "../middleware/auth";
 import { pool } from "../db/pool";
+import { auditLogService } from "../services/AuditLogService";
 
 const router = Router();
 
@@ -17,6 +18,14 @@ router.post("/:id/promote", authenticate, requireRole("admin"), async (req, res)
       [id]
     );
     if (!rowCount) return res.status(404).json({ error: "User not found or is a system account" });
+    void auditLogService.log({
+      actorUserId: req.user?.sub ?? null,
+      actionType: "admin.user.promote",
+      entityType: "user",
+      entityId: id,
+      correlationId: req.correlationId ?? null,
+      metadata: { to_role: "admin" },
+    });
     return res.json({ user: rows[0] });
   } catch (err) {
     console.error("POST /admin/users/:id/promote error:", err);
@@ -37,6 +46,14 @@ router.post("/:id/demote", authenticate, requireRole("admin"), async (req, res) 
       [id]
     );
     if (!rowCount) return res.status(404).json({ error: "User not found or is a system account" });
+    void auditLogService.log({
+      actorUserId: req.user?.sub ?? null,
+      actionType: "admin.user.demote",
+      entityType: "user",
+      entityId: id,
+      correlationId: req.correlationId ?? null,
+      metadata: { to_role: "user" },
+    });
     return res.json({ user: rows[0] });
   } catch (err) {
     console.error("POST /admin/users/:id/demote error:", err);
@@ -57,6 +74,14 @@ router.post("/:id/freeze", authenticate, requireRole("admin"), async (req, res) 
       [id]
     );
     if (!rowCount) return res.status(404).json({ error: "User not found or is a system account" });
+    void auditLogService.log({
+      actorUserId: req.user?.sub ?? null,
+      actionType: "admin.user.freeze",
+      entityType: "user",
+      entityId: id,
+      correlationId: req.correlationId ?? null,
+      metadata: { is_frozen: true },
+    });
     return res.json({ user: rows[0] });
   } catch (err) {
     console.error("POST /admin/users/:id/freeze error:", err);
@@ -74,6 +99,14 @@ router.post("/:id/unfreeze", authenticate, requireRole("admin"), async (req, res
       [id]
     );
     if (!rowCount) return res.status(404).json({ error: "User not found" });
+    void auditLogService.log({
+      actorUserId: req.user?.sub ?? null,
+      actionType: "admin.user.unfreeze",
+      entityType: "user",
+      entityId: id,
+      correlationId: req.correlationId ?? null,
+      metadata: { is_frozen: false },
+    });
     return res.json({ user: rows[0] });
   } catch (err) {
     console.error("POST /admin/users/:id/unfreeze error:", err);

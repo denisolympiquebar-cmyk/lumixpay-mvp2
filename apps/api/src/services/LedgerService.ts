@@ -20,6 +20,10 @@ import { notificationService } from "./NotificationService";
 import { treasuryService } from "./TreasuryService";
 import { streamService } from "./StreamService";
 import { config } from "../config";
+import {
+  SettlementProvider,
+  settlementProvider as defaultSettlementProvider,
+} from "../xrpl";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parameter types
@@ -67,6 +71,11 @@ export interface ReviewWithdrawalParams {
   note?: string;
 }
 
+export interface SettleWithdrawalParams {
+  withdrawalId: string;
+  adminId: string;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LedgerService
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,7 +83,12 @@ export interface ReviewWithdrawalParams {
 export class LedgerService {
   constructor(
     private readonly fees: FeeService = feeService,
-    private readonly payments: MockPaymentProvider = mockPaymentProvider
+    private readonly payments: MockPaymentProvider = mockPaymentProvider,
+    // ── XRPL INTEGRATION POINT ──────────────────────────────────────────────
+    // Phase 2: pass XrplSettlementService here (or set SETTLEMENT_PROVIDER=xrpl).
+    // Default uses MockSettlementProvider which always confirms without network calls.
+    // ────────────────────────────────────────────────────────────────────────
+    private readonly settlement: SettlementProvider = defaultSettlementProvider
   ) {}
 
   // ── Private: core double-entry posting ─────────────────────────────────────
@@ -116,6 +130,14 @@ export class LedgerService {
       creditField = "available",
     } = params;
 
+    // Runtime invariants: never write invalid/degenerate journal lines.
+    if (debitAccountId === creditAccountId) {
+      throw new Error("Ledger invariant failed: debit account equals credit account");
+    }
+    if (amount.lte(0)) {
+      throw new Error("Ledger invariant failed: amount must be > 0");
+    }
+
     // 1. Write the immutable journal row
     const { rows } = await client.query<LedgerEntry>(
       `INSERT INTO ledger_entries
@@ -138,20 +160,26 @@ export class LedgerService {
     const entry = rows[0]!;
 
     // 2. Apply debit: reduce debitField on debit account
-    await client.query(
+    const debitRes = await client.query(
       `UPDATE balances
           SET ${debitField} = ${debitField} - $1, updated_at = NOW()
         WHERE account_id = $2`,
       [amount.toFixed(6), debitAccountId]
     );
+    if (debitRes.rowCount !== 1) {
+      throw new Error(`Ledger invariant failed: missing debit balance row for ${debitAccountId}`);
+    }
 
     // 3. Apply credit: increase creditField on credit account
-    await client.query(
+    const creditRes = await client.query(
       `UPDATE balances
           SET ${creditField} = ${creditField} + $1, updated_at = NOW()
         WHERE account_id = $2`,
       [amount.toFixed(6), creditAccountId]
     );
+    if (creditRes.rowCount !== 1) {
+      throw new Error(`Ledger invariant failed: missing credit balance row for ${creditAccountId}`);
+    }
 
     return entry;
   }
@@ -666,6 +694,248 @@ export class LedgerService {
       [accountId, limit, offset]
     );
     return rows;
+  }
+
+  // ── Public: settleWithdrawal ─────────────────────────────────────────────────
+
+  /**
+   * Executes the settlement of an already-approved withdrawal request.
+   *
+   * This is the Phase 2 injection point described in reviewWithdrawal().
+   * The flow is deliberately separated from approval so that:
+   *   - Approval = admin authorisation intent (status: approved)
+   *   - Settlement = actual execution (status: settled)
+   *
+   * Ledger entries posted:
+   *   withdrawal_escrow → FLOAT  (net_amount)  [entry_type=withdrawal_settle]
+   *
+   * ── ACCOUNTING NOTE ──────────────────────────────────────────────────────────
+   * Debit  withdrawal_escrow.available -= net  (escrowed funds released)
+   * Credit FLOAT.available             += net  (reserve credited — mirrors on-chain debit)
+   *
+   * Separately, user.locked -= net (obligation cleared — funds are gone on-chain).
+   *
+   * Net effect on FLOAT balance after a full topup→withdraw→settle cycle:
+   *   topup:    FLOAT.available -= gross  (reserve paid user)
+   *   settle:   FLOAT.available += net    (reserve credited from escrow)
+   *   delta:    FLOAT.available -= fee    (platform kept the fee)
+   *
+   * This means FLOAT tracks total stablecoin custody minus fee revenue.
+   * In Phase 2 this must be reconciled against the actual XRPL hot wallet balance
+   * using TreasuryService.syncFromChain() (to be implemented).
+   * ─────────────────────────────────────────────────────────────────────────────
+   *
+   * Idempotency:
+   *   - If status='settled' on entry, the existing row is returned immediately.
+   *   - If xrpl_submitted_at is set but xrpl_confirmed_at is null, a concurrent
+   *     settlement is likely in-flight — return 409 SETTLEMENT_IN_FLIGHT.
+   *   - The DB transaction uses SELECT FOR UPDATE to prevent a race between two
+   *     concurrent admin /settle calls arriving simultaneously.
+   */
+  async settleWithdrawal(params: SettleWithdrawalParams): Promise<WithdrawalRequest> {
+    const { withdrawalId } = params;
+
+    // ── 1. Pre-flight status check (outside transaction — fast path) ──────────
+    const { rows: preRows } = await pool.query<WithdrawalRequest>(
+      "SELECT * FROM withdrawal_requests WHERE id = $1",
+      [withdrawalId]
+    );
+    const pre = preRows[0];
+    if (!pre) {
+      throw Object.assign(new Error(`Withdrawal request ${withdrawalId} not found`), { status: 404 });
+    }
+
+    // Already fully settled — idempotent return
+    if (pre.status === "settled") {
+      return pre;
+    }
+
+    // Only approved withdrawals can be settled
+    if (pre.status !== "approved") {
+      throw Object.assign(
+        new Error(
+          `Cannot settle withdrawal in status '${pre.status}'. ` +
+          `Withdrawal must be in 'approved' status.`
+        ),
+        { status: 409, code: "INVALID_STATUS_FOR_SETTLEMENT" }
+      );
+    }
+
+    // Guard against a settlement that is already submitted but not yet confirmed
+    // (e.g. provider is slow, or the process crashed between submit and confirm).
+    if (pre.xrpl_submitted_at !== null && pre.xrpl_confirmed_at === null) {
+      throw Object.assign(
+        new Error(
+          "Settlement already submitted and awaiting provider confirmation. " +
+          "Do not retry until the current attempt has resolved."
+        ),
+        { status: 409, code: "SETTLEMENT_IN_FLIGHT" }
+      );
+    }
+
+    // ── 2. Mark as submitted BEFORE calling the provider ─────────────────────
+    // Writing xrpl_submitted_at first is a deliberate two-phase write:
+    // If the process crashes after provider.settle() returns but before the DB
+    // COMMIT, the SETTLEMENT_IN_FLIGHT guard above prevents blind re-submission.
+    // The admin can then inspect the withdrawal row and decide whether to check
+    // the provider directly or reset the submitted_at to retry.
+    //
+    // ── XRPL INTEGRATION POINT ───────────────────────────────────────────────
+    // In Phase 2, before re-submitting, XrplClient.getTxStatus(xrpl_tx_hash)
+    // should be checked first. If the TX is already validated on-chain, call
+    // settleWithdrawal() with the existing txHash rather than submitting again.
+    // ─────────────────────────────────────────────────────────────────────────
+    const providerName = process.env["SETTLEMENT_PROVIDER"] ?? "mock";
+    await pool.query(
+      `UPDATE withdrawal_requests
+          SET settlement_provider = $1,
+              xrpl_submitted_at   = NOW(),
+              updated_at          = NOW()
+        WHERE id = $2 AND status = 'approved' AND xrpl_submitted_at IS NULL`,
+      [providerName, withdrawalId]
+    );
+
+    // ── 3. Fetch issuer address for the asset (needed by XRPL provider) ───────
+    const { rows: assetRows } = await pool.query<{ issuer_address: string }>(
+      "SELECT issuer_address FROM assets WHERE id = $1",
+      [pre.asset_id]
+    );
+    const issuerAddress = assetRows[0]?.issuer_address ?? "";
+
+    const net      = new Decimal(pre.net_amount);
+    const currency = this.getCurrencyCode(pre.asset_id);
+    const sys      = this.systemAccounts(pre.asset_id);
+
+    // ── 4. Call the settlement provider ──────────────────────────────────────
+    // Provider is responsible for delivering funds to the user's destination.
+    // It must NOT throw — errors are surfaced via result.status='failed'|'timeout'.
+    //
+    // ── XRPL INTEGRATION POINT ───────────────────────────────────────────────
+    // Phase 2: XrplSettlementService.settle() will:
+    //   - Build and sign an XRPL issued-currency Payment TX
+    //   - Submit to the network
+    //   - Poll until the TX appears in a validated ledger (or timeout)
+    //   - Return the tx_hash and actual XRP fee consumed
+    // ─────────────────────────────────────────────────────────────────────────
+    const settlementResult = await this.settlement.settle({
+      withdrawalId,
+      destinationAddress:  pre.xrpl_destination_address,
+      destinationTag:      pre.xrpl_destination_tag,
+      amountDecimal:       net.toFixed(6),
+      assetCode:           currency,
+      assetIssuerAddress:  issuerAddress,
+    });
+
+    // ── 5. Persist the result inside a serialised DB transaction ─────────────
+    const settled = await withTransaction(async (client) => {
+      // Re-fetch with row lock to prevent concurrent settlement writes
+      const { rows: locked } = await client.query<WithdrawalRequest>(
+        "SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE",
+        [withdrawalId]
+      );
+      const wr = locked[0]!;
+
+      // Concurrent call already settled — idempotent return
+      if (wr.status === "settled") {
+        return wr;
+      }
+
+      if (settlementResult.status !== "confirmed") {
+        // Provider failed or timed out — reset xrpl_submitted_at so the admin
+        // can safely retry after investigating the failure.
+        await client.query(
+          `UPDATE withdrawal_requests
+              SET xrpl_submitted_at   = NULL,
+                  settlement_provider = NULL,
+                  updated_at          = NOW()
+            WHERE id = $1`,
+          [withdrawalId]
+        );
+        throw Object.assign(
+          new Error(
+            `Settlement provider returned status '${settlementResult.status}' ` +
+            `(txHash: ${settlementResult.txHash}). xrpl_submitted_at has been reset — safe to retry.`
+          ),
+          { status: 502, code: "SETTLEMENT_PROVIDER_FAILED", txHash: settlementResult.txHash }
+        );
+      }
+
+      // ── Ledger entry: withdrawal_escrow → FLOAT [withdrawal_settle] ──────
+      // ── ACCOUNTING NOTE ──────────────────────────────────────────────────
+      // Debit  withdrawalEscrow.available -= net  (escrow releases the funds)
+      // Credit float.available            += net  (reserve re-credited)
+      //
+      // user.locked is decremented explicitly below (separate balance row update).
+      // postEntry uses debitField='available' and creditField='available' (defaults).
+      // ─────────────────────────────────────────────────────────────────────
+      await this.postEntry(client, {
+        idempotencyKey:   `withdrawal_settle:${withdrawalId}`,
+        debitAccountId:   sys.withdrawalEscrow,
+        creditAccountId:  sys.float,
+        assetId:          wr.asset_id,
+        amount:           net,
+        entryType:        "withdrawal_settle",
+        referenceId:      withdrawalId,
+        referenceType:    "withdrawal_requests",
+        metadata: {
+          xrpl_tx_hash:       settlementResult.txHash,
+          settlement_provider: providerName,
+          xrpl_destination:   wr.xrpl_destination_address,
+          xrpl_destination_tag: wr.xrpl_destination_tag ?? null,
+        },
+      });
+
+      // Clear the user's locked balance — the obligation is now settled
+      await client.query(
+        `UPDATE balances
+            SET locked     = locked - $1,
+                updated_at = NOW()
+          WHERE account_id = $2`,
+        [net.toFixed(6), wr.account_id]
+      );
+
+      // Stamp the withdrawal row as settled
+      const { rows: settledRows } = await client.query<WithdrawalRequest>(
+        `UPDATE withdrawal_requests
+            SET status               = 'settled',
+                xrpl_tx_hash         = $1,
+                xrpl_confirmed_at    = $2,
+                xrpl_network_fee_xrp = $3,
+                updated_at           = NOW()
+          WHERE id = $4
+          RETURNING *`,
+        [
+          settlementResult.txHash,
+          settlementResult.confirmedAt.toISOString(),
+          settlementResult.networkFeeCostXrp ?? null,
+          withdrawalId,
+        ]
+      );
+
+      return settledRows[0]!;
+    });
+
+    // ── 6. Post-commit: notifications + SSE (fire-and-forget) ─────────────────
+    void notificationService
+      .create({
+        userId: pre.user_id,
+        type: "withdrawal.settled",
+        title: "Withdrawal settled",
+        body:
+          `Your withdrawal of ${pre.net_amount} ${currency} has been sent to ` +
+          `${pre.xrpl_destination_address}. TX: ${settled.xrpl_tx_hash}`,
+        metadata: {
+          withdrawal_id:    withdrawalId,
+          xrpl_tx_hash:     settled.xrpl_tx_hash,
+          settlement_provider: providerName,
+        },
+      })
+      .catch((e) => console.error("notification error (withdrawal.settle):", e));
+
+    void this.publishBalancesAndActivity(pre.user_id, pre.account_id, null);
+    void streamService.publishAdmin("admin.withdrawals.updated", { withdrawalId, status: "settled" });
+
+    return settled;
   }
 
   // ── SSE helper ──────────────────────────────────────────────────────────────

@@ -19,6 +19,41 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
   return Uint8Array.from(rawData, (c) => c.charCodeAt(0));
 }
 
+export type PushUiStatus =
+  | "UNSUPPORTED"
+  | "PERMISSION_REQUIRED"
+  | "BLOCKED"
+  | "ENABLED"
+  | "DISABLED";
+
+async function ensureServiceWorkerRegistration(): Promise<ServiceWorkerRegistration> {
+  if (!("serviceWorker" in navigator)) throw new Error("Service worker not supported");
+
+  // Prefer any existing registration first.
+  const existing = await navigator.serviceWorker.getRegistration();
+  if (existing) return existing;
+
+  // Fallback: register explicitly (helps local dev if auto-registration timing is off).
+  // VitePWA injectManifest output uses /service-worker.js in production builds.
+  try {
+    return await navigator.serviceWorker.register("/service-worker.js");
+  } catch (e: any) {
+    throw new Error(`Service worker registration failed: ${e?.message ?? String(e)}`);
+  }
+}
+
+export async function getPushStatus(): Promise<PushUiStatus> {
+  if (typeof window === "undefined") return "UNSUPPORTED";
+  if (!("Notification" in window) || !("PushManager" in window) || !("serviceWorker" in navigator)) return "UNSUPPORTED";
+
+  if (Notification.permission === "denied") return "BLOCKED";
+  if (Notification.permission !== "granted") return "PERMISSION_REQUIRED";
+
+  const reg = await ensureServiceWorkerRegistration();
+  const sub = await reg.pushManager.getSubscription();
+  return sub ? "ENABLED" : "DISABLED";
+}
+
 /**
  * Request permission and subscribe to push notifications.
  * Returns `true` on success, `false` if the user denied, throws on error.
@@ -37,9 +72,10 @@ export async function subscribeToPush(token: string): Promise<boolean> {
     "/push/vapid-public-key",
     null
   );
+  if (!vapidPublicKey) throw new Error("Push is not configured on the server (missing VAPID public key)");
 
-  // 3. Get service worker registration (VitePWA registers it automatically)
-  const registration = await navigator.serviceWorker.ready;
+  // 3. Get service worker registration (VitePWA registers automatically, but be robust in dev)
+  const registration = await ensureServiceWorkerRegistration();
 
   // 4. Subscribe
   const subscription = await registration.pushManager.subscribe({
@@ -70,7 +106,7 @@ export async function subscribeToPush(token: string): Promise<boolean> {
  */
 export async function unsubscribeFromPush(token: string): Promise<void> {
   if (!("serviceWorker" in navigator)) return;
-  const registration = await navigator.serviceWorker.ready;
+  const registration = await ensureServiceWorkerRegistration();
   const sub = await registration.pushManager.getSubscription();
   if (!sub) return;
 

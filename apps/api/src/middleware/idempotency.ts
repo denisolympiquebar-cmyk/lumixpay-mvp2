@@ -23,7 +23,8 @@ export function idempotent(req: Request, res: Response, next: NextFunction): voi
   const userId  = req.user?.sub;
   if (!userId) { next(); return; } // unauthenticated — skip
 
-  const route       = req.path;
+  // Use a stable route key at router-level (baseUrl + path) to avoid collisions.
+  const route       = `${req.baseUrl || ""}${req.path}`;
   const method      = req.method.toUpperCase();
   const bodyStr     = JSON.stringify(req.body ?? {});
   const requestHash = crypto.createHash("sha256").update(bodyStr).digest("hex");
