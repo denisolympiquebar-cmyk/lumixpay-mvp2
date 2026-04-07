@@ -121,11 +121,12 @@ export default function DocsPage() {
       {/* Main layout */}
       <section className="lp-section" style={{ paddingTop: 40, paddingBottom: 80 }}>
         <div
-          className="lp-container"
+          className="lp-container lp-docs-layout"
+          data-page="docs"
           style={{ display: "grid", gridTemplateColumns: "clamp(160px,18%,210px) 1fr", gap: 48, alignItems: "start" }}
         >
           {/* Sticky TOC */}
-          <nav style={{ position: "sticky", top: 88, display: "flex", flexDirection: "column", gap: 5, borderRight: "1px solid var(--border)", paddingRight: 20 }}>
+          <nav className="lp-docs-toc" style={{ position: "sticky", top: 88, display: "flex", flexDirection: "column", gap: 5, borderRight: "1px solid var(--border)", paddingRight: 20 }}>
             {tocLinks.map(([href, label]) => (
               <a
                 key={href}
@@ -147,7 +148,7 @@ export default function DocsPage() {
               <Anchor id="overview" />
               <h2 style={{ fontWeight: 800, fontSize: "1.35rem", letterSpacing: "-0.03em", marginBottom: 14 }}>Overview</h2>
               <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "20px 24px", marginBottom: 20 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <div className="lp-mobile-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                   {[
                     ["Base URL", BASE],
                     ["Auth", "Bearer JWT — include in Authorization header"],

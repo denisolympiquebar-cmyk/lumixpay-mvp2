@@ -93,6 +93,88 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Prevent page-wide horizontal overflow on public pages */
+.lp-root *,
+.lp-root *::before,
+.lp-root *::after {
+  box-sizing: border-box;
+}
+.lp-root pre,
+.lp-root code {
+  max-width: 100%;
+}
+.lp-root img,
+.lp-root svg,
+.lp-root video,
+.lp-root canvas {
+  max-width: 100%;
+}
+
+/* Public pages: ensure content sits below fixed header */
+.lp-page-hero {
+  padding-top: 110px;
+}
+.lp-section-sm {
+  padding-top: 22px;
+}
+
+/* Public typography (Docs/Developers hero titles) */
+.lp-h2-hero {
+  font-size: clamp(1.75rem, 5.6vw, 3.0rem);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  margin: 10px 0 10px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.lp-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(124,58,237,.18);
+  background: rgba(124,58,237,.07);
+  color: var(--lp-sub);
+  font-size: .78rem;
+  font-weight: 600;
+}
+.lp-divider {
+  border: none;
+  border-top: 1px solid rgba(255,255,255,.06);
+  margin: 0;
+}
+.lp-grid { display: grid; gap: 16px; }
+.lp-grid-2 { grid-template-columns: 1fr 1fr; }
+.lp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .9rem;
+}
+.lp-table th,
+.lp-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  vertical-align: top;
+}
+.lp-table th { color: var(--lp-sub); font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; }
+
+/* Code blocks used on /docs and /developers */
+.lp-code {
+  margin: 0;
+  padding: 14px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(3,5,14,.92);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
 /* ── Navbar ────────────────────────────────────────────────────────────────── */
 .lp-nav {
   position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
@@ -654,6 +736,49 @@
   .bc-third   { grid-column: span 12; }
   .footer-top { grid-template-columns: 1fr; }
   .lp-footer  { padding: 48px 22px 24px; }
+
+  /* Public hero pages (docs/developers): reduce crowding under fixed header */
+  .lp-page-hero { padding-top: 92px; }
+  .lp-section-sm { padding-top: 14px; }
+  .lp-grid-2 { grid-template-columns: 1fr; }
+}
+
+/* Small phones: tighten hero + header spacing */
+@media (max-width: 420px) {
+  .lp-nav { padding: 0 14px; height: 60px; }
+  .lp-mobile-menu { top: 60px; }
+  .lp-logo-img { height: 32px; }
+  .lp-hero { padding: 96px 16px 64px; }
+  .hero-badge { margin-bottom: 18px; }
+  .hero-h1 { margin-bottom: 16px; }
+  .hero-sub { margin-bottom: 28px; }
+  .hero-scroll { bottom: 18px; }
+}
+
+/* Docs mobile layout: stack TOC above content and allow horizontal scroll */
+@media (max-width: 900px) {
+  .lp-docs-layout {
+    display: block !important;
+  }
+  .lp-docs-toc {
+    position: relative !important;
+    top: 0 !important;
+    border-right: none !important;
+    padding-right: 0 !important;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    padding-bottom: 10px;
+    margin-bottom: 18px;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-mobile-grid-2 { grid-template-columns: 1fr !important; }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -887,6 +1012,27 @@
     min-width: 270px;
   }
   .water-balloon.right { top: calc(68% + 72px); }
+}
+
+/* Mandatory: hide decorative hero balloons on mobile/tablet to prevent overlaps */
+@media (max-width: 768px), (max-height: 820px) {
+  .hero-water-ctas { display: none !important; }
+}
+
+/* Hero CTA buttons: stack vertically on small screens */
+@media (max-width: 520px) {
+  .hero-ctas {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .hero-ctas .btn-primary,
+  .hero-ctas .btn-outline {
+    width: 100%;
+    max-width: 420px;
+    justify-content: center;
+  }
+  .hero-sub { margin-bottom: 26px; }
 }
 
 .wb-text { position: relative; z-index: 2; }
