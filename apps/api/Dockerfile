@@ -29,6 +29,11 @@ ENV NODE_ENV=production
 COPY --from=builder /app/apps/api/dist ./dist
 COPY --from=builder /app/apps/api/package.json ./package.json
 
+# SQL migration files are plain text — tsc does NOT copy them into dist/.
+# Copy them to the exact path that dist/db/migrate.js resolves at runtime:
+#   path.join(__dirname, "migrations")  →  dist/db/migrations/
+COPY --from=builder /app/apps/api/src/db/migrations ./dist/db/migrations
+
 # Copy the full workspace node_modules (includes hoisted production deps)
 COPY --from=builder /app/node_modules /app/node_modules
 
