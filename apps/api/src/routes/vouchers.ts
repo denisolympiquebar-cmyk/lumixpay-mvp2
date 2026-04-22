@@ -78,6 +78,67 @@ router.post("/admin/:id/disable", authenticate, requireRole("admin"), async (req
   }
 });
 
+// ── Admin: Voucher product catalog management ─────────────────────────────────
+
+const CreateProductSchema = z.object({
+  asset_id:  z.string().uuid(),
+  amount:    z.number().positive(),
+});
+
+// GET /vouchers/admin/products — list all products (active + inactive)
+router.get("/admin/products", authenticate, requireRole("admin"), async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT vp.*, a.currency_code, a.display_symbol, a.display_name
+         FROM voucher_products vp
+         JOIN assets a ON a.id = vp.asset_id
+        ORDER BY a.currency_code, vp.amount`
+    );
+    return res.json({ products: rows });
+  } catch (err) {
+    console.error("GET /vouchers/admin/products error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /vouchers/admin/products — create a new purchasable product
+router.post("/admin/products", authenticate, requireRole("admin"), async (req, res) => {
+  const parsed = CreateProductSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
+  }
+  const { asset_id, amount } = parsed.data;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO voucher_products (asset_id, amount, is_active)
+       VALUES ($1, $2, TRUE) RETURNING *`,
+      [asset_id, new Decimal(amount).toFixed(6)]
+    );
+    return res.status(201).json({ product: rows[0] });
+  } catch (err) {
+    console.error("POST /vouchers/admin/products error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /vouchers/admin/products/:id/toggle — activate or deactivate a product
+router.patch("/admin/products/:id/toggle", authenticate, requireRole("admin"), async (req, res) => {
+  try {
+    const { rows, rowCount } = await pool.query(
+      `UPDATE voucher_products
+          SET is_active = NOT is_active
+        WHERE id = $1
+        RETURNING *`,
+      [req.params["id"]]
+    );
+    if (!rowCount) return res.status(404).json({ error: "Product not found" });
+    return res.json({ product: rows[0] });
+  } catch (err) {
+    console.error("PATCH /vouchers/admin/products/:id/toggle error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // ── User endpoint ─────────────────────────────────────────────────────────────
 
 const RedeemSchema = z.object({ code: z.string().min(1) });

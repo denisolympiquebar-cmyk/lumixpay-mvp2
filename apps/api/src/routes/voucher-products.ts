@@ -5,6 +5,7 @@ import Decimal from "decimal.js";
 import { authenticate } from "../middleware/auth";
 import { requireNotFrozen } from "../middleware/frozen";
 import { idempotent } from "../middleware/idempotency";
+import { requireIdempotencyKey } from "../middleware/require-idempotency";
 import { pool, withTransaction } from "../db/pool";
 import { Account } from "../db/types";
 import { notificationService } from "../services/NotificationService";
@@ -36,7 +37,7 @@ const PurchaseSchema = z.object({
   product_id: z.string().uuid(),
 });
 
-router.post("/purchase", authenticate, requireNotFrozen, idempotent, async (req, res) => {
+router.post("/purchase", authenticate, requireNotFrozen, requireIdempotencyKey, idempotent, async (req, res) => {
   const parsed = PurchaseSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });

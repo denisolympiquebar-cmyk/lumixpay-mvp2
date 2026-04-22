@@ -206,7 +206,10 @@ export interface Voucher {
   asset_id: string;
   gross_amount: string;
   status: VoucherStatus;
-  created_by_admin_id: string;
+  /** NULL for user-purchased vouchers (see migration 016). */
+  created_by_admin_id: string | null;
+  /** NULL for admin-gifted vouchers. Set when a user buys via /vouchers/purchase. */
+  purchased_by_user_id: string | null;
   redeemed_by_user_id: string | null;
   redeemed_at: Date | null;
   expires_at: Date | null;

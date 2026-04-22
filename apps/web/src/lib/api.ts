@@ -2,6 +2,15 @@
 // In production: set VITE_API_BASE=https://lumixpay-api.fly.dev  (no trailing slash)
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
+/**
+ * Generate a fresh idempotency key for a single user-initiated write action.
+ * Call once per button click / form submit — pass the result as the
+ * "Idempotency-Key" header to any endpoint that enforces requireIdempotencyKey.
+ */
+export function generateIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
 /** Normalize any backend error payload to a human-readable string. */
 function extractMessage(data: unknown): string {
   if (typeof data === "string" && data.length > 0) return data;
@@ -41,9 +50,7 @@ export async function apiFetch<T>(
   }
 
   if (!res.ok) {
-    if (import.meta.env.DEV) {
-      console.error(`[apiFetch] ${options.method ?? "GET"} ${url} → ${res.status}`, data);
-    }
+    console.error(`[apiFetch] ${options.method ?? "GET"} ${url} → ${res.status}`, data);
     throw new Error(extractMessage(data));
   }
 

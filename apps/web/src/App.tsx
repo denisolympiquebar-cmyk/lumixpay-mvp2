@@ -2,7 +2,7 @@ import React, { createContext, useContext, useMemo, useState, useEffect, useCall
 import { Routes, Route, Navigate, Link, useNavigate, useLocation, useParams } from "react-router-dom";
 import type { ApiUser, ApiAccountBalance } from "@lumixpay/shared";
 import QRCode from "react-qr-code";
-import { apiFetch } from "./lib/api";
+import { apiFetch, generateIdempotencyKey } from "./lib/api";
 import { ToastProvider, useToast } from "./lib/toast";
 import { canInstall, promptInstall, isIos, isInStandaloneMode } from "./lib/pwa-install";
 import { subscribeToPush, unsubscribeFromPush, pushEnabled, getPushStatus, type PushUiStatus } from "./lib/push-notifications";
@@ -824,6 +824,7 @@ function TopUpPage() {
     try {
       await apiFetch("/topup", token, {
         method: "POST",
+        headers: { "Idempotency-Key": generateIdempotencyKey() },
         body: JSON.stringify({ asset_id: assetId, gross_amount: amount, simulated_card_last4: last4 }),
       });
       await refresh();
@@ -1158,7 +1159,11 @@ function WithdrawPage() {
       };
       const tagTrim = xrplTag.trim();
       if (tagTrim) payload.xrpl_destination_tag = Number(tagTrim);
-      const res = await apiFetch<any>("/withdrawals", token, { method: "POST", body: JSON.stringify(payload) });
+      const res = await apiFetch<any>("/withdrawals", token, {
+        method: "POST",
+        headers: { "Idempotency-Key": generateIdempotencyKey() },
+        body: JSON.stringify(payload),
+      });
       await refresh();
       void refreshNotifs();
       setWithdrawalId(res?.withdrawal?.id ?? null);
@@ -1777,6 +1782,7 @@ function NotificationsPage() {
                     }
                   }
                 } catch (e: any) {
+                  console.error("[Push] UI error (notifications page):", e);
                   addToast(e?.message ?? "Push setup failed", "error");
                 } finally {
                   setPushWorking(false);
@@ -2330,51 +2336,75 @@ function VouchersPage() {
   // Redeem tab
   const [code, setCode] = useState("");
   const [redeemLoading, setRedeemLoading] = useState(false);
-  const [redeemMsg, setRedeemMsg] = useState("");
+  const [redeemSuccess, setRedeemSuccess] = useState("");
+  const [redeemError, setRedeemError] = useState("");
 
-  // Buy tab
+  // Buy tab — split success/error so FeedbackBanner type is always correct
   const [products, setProducts] = useState<any[]>([]);
-  const [buyMsg, setBuyMsg] = useState("");
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState("");
+  const [buySuccess, setBuySuccess] = useState("");
+  const [buyError, setBuyError] = useState("");
   const [buyLoading, setBuyLoading] = useState<string | null>(null);
   const [newCode, setNewCode] = useState<string | null>(null);
 
   // My vouchers tab
   const [myVouchers, setMyVouchers] = useState<any[]>([]);
+  const [mineError, setMineError] = useState("");
 
-  const loadMine = () =>
+  const loadMine = () => {
     apiFetch<{ vouchers: any[] }>("/vouchers/mine", token)
-      .then((d) => setMyVouchers(d.vouchers ?? []))
-      .catch(() => {});
+      .then((d) => { setMyVouchers(d.vouchers ?? []); setMineError(""); })
+      .catch((err: any) => {
+        console.error("[Vouchers] Failed to load my vouchers:", err);
+        setMineError(friendlyError(err));
+      });
+  };
 
   useEffect(() => {
+    setProductsLoading(true);
     apiFetch<{ products: any[] }>("/voucher-products", token)
-      .then((d) => setProducts(d.products ?? []))
-      .catch(() => {});
-    void loadMine();
+      .then((d) => { setProducts(d.products ?? []); setProductsError(""); })
+      .catch((err: any) => {
+        console.error("[Vouchers] Failed to load products:", err);
+        setProductsError("Could not load voucher products. Please try again.");
+      })
+      .finally(() => setProductsLoading(false));
+    loadMine();
   }, [token]);
 
   const redeem = async (e: React.FormEvent) => {
-    e.preventDefault(); setRedeemMsg(""); setRedeemLoading(true);
+    e.preventDefault();
+    setRedeemSuccess(""); setRedeemError(""); setRedeemLoading(true);
     try {
       const d = await apiFetch<{ ok: boolean; credited: string }>("/vouchers/redeem", token, {
-        method: "POST", body: JSON.stringify({ code }),
+        method: "POST",
+        headers: { "Idempotency-Key": generateIdempotencyKey() },
+        body: JSON.stringify({ code }),
       });
-      setRedeemMsg(`Redeemed successfully — ${d.credited} credited to your balance`);
-      setCode(""); void refresh(); void loadMine();
-    } catch (err: any) { setRedeemMsg(friendlyError(err)); }
-    finally { setRedeemLoading(false); }
+      setRedeemSuccess(`Redeemed — ${d.credited} credited to your balance.`);
+      setCode(""); void refresh(); loadMine();
+    } catch (err: any) {
+      console.error("[Vouchers] Redeem failed:", err);
+      setRedeemError(friendlyError(err));
+    } finally { setRedeemLoading(false); }
   };
 
   const purchase = async (productId: string) => {
-    setBuyMsg(""); setBuyLoading(productId); setNewCode(null);
+    setBuySuccess(""); setBuyError(""); setBuyLoading(productId); setNewCode(null);
     try {
       const d = await apiFetch<{ voucher: any; code: string }>("/vouchers/purchase", token, {
-        method: "POST", body: JSON.stringify({ product_id: productId }),
+        method: "POST",
+        headers: { "Idempotency-Key": generateIdempotencyKey() },
+        body: JSON.stringify({ product_id: productId }),
       });
-      setNewCode(d.code); setBuyMsg("Voucher purchased successfully. Your code is ready to use or share.");
-      void refresh(); void loadMine();
-    } catch (err: any) { setBuyMsg(friendlyError(err)); }
-    finally { setBuyLoading(null); }
+      setNewCode(d.code);
+      setBuySuccess("Voucher purchased successfully. Your code is ready to use or share.");
+      void refresh(); loadMine();
+    } catch (err: any) {
+      console.error("[Vouchers] Purchase failed:", err);
+      setBuyError(friendlyError(err));
+    } finally { setBuyLoading(null); }
   };
 
   // Group products by asset symbol
@@ -2409,12 +2439,8 @@ function VouchersPage() {
               required
             />
             <button type="submit" disabled={redeemLoading}>{redeemLoading ? "Redeeming..." : "Redeem Voucher"}</button>
-            {redeemMsg && (
-              <FeedbackBanner
-                type={redeemMsg.includes("Redeemed") ? "success" : "error"}
-                message={redeemMsg.replace(" ✅", "").replace("✅", "").trim()}
-              />
-            )}
+            {redeemSuccess && <FeedbackBanner type="success" message={redeemSuccess} />}
+            {redeemError   && <FeedbackBanner type="error"   message={redeemError} />}
           </form>
         </div>
       )}
@@ -2429,13 +2455,16 @@ function VouchersPage() {
               <p className="muted" style={{ fontSize: "0.78rem", marginTop: 8 }}>Balance deducted. You can redeem or share this code.</p>
             </div>
           )}
-          {buyMsg && (
-            <FeedbackBanner
-              type={buyMsg.includes("Purchased") ? "success" : "error"}
-              message={buyMsg.replace(" ✅", "").replace("✅", "").trim()}
-            />
+          {buySuccess && <FeedbackBanner type="success" message={buySuccess} />}
+          {buyError   && <FeedbackBanner type="error"   message={buyError} />}
+
+          {productsLoading && (
+            <p className="muted" style={{ padding: "20px 0" }}>Loading products…</p>
           )}
-          {Object.entries(productsByAsset).map(([symbol, prods]) => (
+          {!productsLoading && productsError && (
+            <FeedbackBanner type="error" message={productsError} />
+          )}
+          {!productsLoading && !productsError && Object.entries(productsByAsset).map(([symbol, prods]) => (
             <div key={symbol} style={{ marginBottom: 20 }}>
               <h4 style={{ marginBottom: 10, color: "var(--muted)", fontSize: "0.82rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>{symbol} Vouchers</h4>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 10 }}>
@@ -2450,7 +2479,7 @@ function VouchersPage() {
                       title={!canAfford ? "Insufficient balance" : undefined}
                       style={{
                         padding: "18px 10px", borderRadius: 10,
-                        border: `1px solid ${canAfford ? "var(--border)" : "var(--border)"}`,
+                        border: "1px solid var(--border)",
                         background: canAfford ? "var(--surface)" : "var(--bg)",
                         cursor: canAfford ? "pointer" : "not-allowed",
                         opacity: canAfford ? 1 : 0.5,
@@ -2464,13 +2493,16 @@ function VouchersPage() {
               </div>
             </div>
           ))}
-          {products.length === 0 && <p className="muted">No products available.</p>}
+          {!productsLoading && !productsError && products.length === 0 && (
+            <p className="muted">No voucher products available. Ask an admin to add products to the catalog.</p>
+          )}
         </div>
       )}
 
       {tab === "mine" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {myVouchers.length === 0 && <p className="muted">No vouchers purchased yet.</p>}
+          {mineError && <FeedbackBanner type="error" message={mineError} />}
+          {!mineError && myVouchers.length === 0 && <p className="muted">No vouchers purchased yet.</p>}
           {myVouchers.map((v) => (
             <div key={v.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
               <div>
@@ -2497,19 +2529,36 @@ function AdminVouchersPage() {
   const { token, user } = useAuth();
   const { accounts } = useBalances();
   const navigate = useNavigate();
+  const [tab, setTab] = useState<"codes" | "products">("codes");
+
+  // ── Gift codes tab ──────────────────────────────────────────────────────────
   const [vouchers, setVouchers] = useState<any[]>([]);
   const [form, setForm] = useState({ asset_id: "", gross_amount: "20" });
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const load = () =>
+  const loadCodes = () =>
     apiFetch<{ vouchers: any[] }>("/vouchers/admin", token)
       .then((d) => setVouchers(d.vouchers ?? []))
-      .catch(() => {});
+      .catch((err: any) => console.error("[AdminVouchers] Failed to load codes:", err));
 
-  useEffect(() => { void load(); }, [token]);
+  // ── Product catalog tab ─────────────────────────────────────────────────────
+  const [products, setProducts] = useState<any[]>([]);
+  const [prodForm, setProdForm] = useState({ asset_id: "", amount: "20" });
+  const [prodMsg, setProdMsg] = useState("");
+  const [prodLoading, setProdLoading] = useState(false);
+
+  const loadProducts = () =>
+    apiFetch<{ products: any[] }>("/vouchers/admin/products", token)
+      .then((d) => setProducts(d.products ?? []))
+      .catch((err: any) => console.error("[AdminVouchers] Failed to load products:", err));
+
+  useEffect(() => { void loadCodes(); void loadProducts(); }, [token]);
   useEffect(() => {
-    if (!form.asset_id && accounts.length) setForm((f) => ({ ...f, asset_id: accounts[0]!.asset_id }));
+    if (!form.asset_id && accounts.length) {
+      setForm((f) => ({ ...f, asset_id: accounts[0]!.asset_id }));
+      setProdForm((f) => ({ ...f, asset_id: accounts[0]!.asset_id }));
+    }
   }, [accounts]);
 
   const create = async (e: React.FormEvent) => {
@@ -2518,14 +2567,33 @@ function AdminVouchersPage() {
       await apiFetch("/vouchers/admin", token, {
         method: "POST", body: JSON.stringify({ asset_id: form.asset_id, gross_amount: parseFloat(form.gross_amount) }),
       });
-      setMsg("Voucher created ✅"); void load();
+      setMsg("Voucher created ✅"); void loadCodes();
     } catch (err: any) { setMsg(err.message ?? "Failed"); }
     finally { setLoading(false); }
   };
 
   const disable = async (id: string) => {
-    try { await apiFetch(`/vouchers/admin/${id}/disable`, token, { method: "POST" }); void load(); }
+    try { await apiFetch(`/vouchers/admin/${id}/disable`, token, { method: "POST" }); void loadCodes(); }
     catch (err: any) { alert(err.message); }
+  };
+
+  const createProduct = async (e: React.FormEvent) => {
+    e.preventDefault(); setProdMsg(""); setProdLoading(true);
+    try {
+      await apiFetch("/vouchers/admin/products", token, {
+        method: "POST",
+        body: JSON.stringify({ asset_id: prodForm.asset_id, amount: parseFloat(prodForm.amount) }),
+      });
+      setProdMsg("Product added ✅"); void loadProducts();
+    } catch (err: any) { setProdMsg(err.message ?? "Failed"); }
+    finally { setProdLoading(false); }
+  };
+
+  const toggleProduct = async (id: string) => {
+    try {
+      await apiFetch(`/vouchers/admin/products/${id}/toggle`, token, { method: "PATCH" });
+      void loadProducts();
+    } catch (err: any) { alert(err.message); }
   };
 
   if (user?.role !== "admin") return (
@@ -2541,39 +2609,93 @@ function AdminVouchersPage() {
         <h2>Admin — Vouchers</h2>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>Back</button>
       </header>
-      <div className="card" style={{ marginBottom: 16 }}>
-        <p className="muted" style={{ marginBottom: 10 }}>Generate a new voucher code</p>
-        <form onSubmit={create} style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div>
-            <label className="muted" style={{ display: "block", marginBottom: 4 }}>Asset</label>
-            <select value={form.asset_id} onChange={(e) => setForm((f) => ({ ...f, asset_id: e.target.value }))}>
-              {accounts.map((a) => <option key={a.id} value={a.asset_id}>{a.asset.display_symbol}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="muted" style={{ display: "block", marginBottom: 4 }}>Amount</label>
-            <input type="number" min="0.01" step="0.01" value={form.gross_amount} onChange={(e) => setForm((f) => ({ ...f, gross_amount: e.target.value }))} style={{ width: 100 }} />
-          </div>
-          <button type="submit" disabled={loading}>{loading ? "…" : "Create"}</button>
-        </form>
-        {msg && <p className={msg.includes("✅") ? "muted" : "error"} style={{ marginTop: 8 }}>{msg}</p>}
+
+      <div className="tabs" style={{ marginBottom: 16 }}>
+        <button className={`tab-btn${tab === "codes" ? " active" : ""}`} onClick={() => setTab("codes")}>Gift Codes</button>
+        <button className={`tab-btn${tab === "products" ? " active" : ""}`} onClick={() => setTab("products")}>Buy Catalog</button>
       </div>
-      {vouchers.length === 0 && <p className="muted">No vouchers yet.</p>}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {vouchers.map((v) => (
-          <div key={v.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
-            <div>
-              <p style={{ fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.1em" }}>{v.code}</p>
-              <p className="muted">{v.display_symbol} · {formatMoney(v.gross_amount)} · {v.status}</p>
-              {v.redeemed_by_user_id && <p className="muted" style={{ fontSize: "0.78rem" }}>Redeemed {new Date(v.redeemed_at).toLocaleString()}</p>}
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <CopyButton text={v.code} />
-              {v.status === "active" && <button onClick={() => disable(v.id)} style={{ background: "var(--danger)", fontSize: "0.78rem" }}>Disable</button>}
-            </div>
+
+      {tab === "codes" && (
+        <>
+          <div className="card" style={{ marginBottom: 16 }}>
+            <p className="muted" style={{ marginBottom: 10 }}>Generate a single-use gift voucher code to share with a user</p>
+            <form onSubmit={create} style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div>
+                <label className="muted" style={{ display: "block", marginBottom: 4 }}>Asset</label>
+                <select value={form.asset_id} onChange={(e) => setForm((f) => ({ ...f, asset_id: e.target.value }))}>
+                  {accounts.map((a) => <option key={a.id} value={a.asset_id}>{a.asset.display_symbol}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="muted" style={{ display: "block", marginBottom: 4 }}>Amount</label>
+                <input type="number" min="0.01" step="0.01" value={form.gross_amount}
+                  onChange={(e) => setForm((f) => ({ ...f, gross_amount: e.target.value }))} style={{ width: 100 }} />
+              </div>
+              <button type="submit" disabled={loading}>{loading ? "…" : "Create"}</button>
+            </form>
+            {msg && <p className={msg.includes("✅") ? "muted" : "error"} style={{ marginTop: 8 }}>{msg}</p>}
           </div>
-        ))}
-      </div>
+          {vouchers.length === 0 && <p className="muted">No gift vouchers yet.</p>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {vouchers.map((v) => (
+              <div key={v.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
+                <div>
+                  <p style={{ fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.1em" }}>{v.code}</p>
+                  <p className="muted">{v.display_symbol} · {formatMoney(v.gross_amount)} · {v.status}</p>
+                  {v.redeemed_by_user_id && <p className="muted" style={{ fontSize: "0.78rem" }}>Redeemed {new Date(v.redeemed_at).toLocaleString()}</p>}
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <CopyButton text={v.code} />
+                  {v.status === "active" && <button onClick={() => disable(v.id)} style={{ background: "var(--danger)", fontSize: "0.78rem" }}>Disable</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {tab === "products" && (
+        <>
+          <div className="card" style={{ marginBottom: 16 }}>
+            <p className="muted" style={{ marginBottom: 4 }}>Add a denomination to the purchasable voucher catalog visible to all users on the Buy Voucher tab.</p>
+            <form onSubmit={createProduct} style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12 }}>
+              <div>
+                <label className="muted" style={{ display: "block", marginBottom: 4 }}>Asset</label>
+                <select value={prodForm.asset_id} onChange={(e) => setProdForm((f) => ({ ...f, asset_id: e.target.value }))}>
+                  {accounts.map((a) => <option key={a.id} value={a.asset_id}>{a.asset.display_symbol}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="muted" style={{ display: "block", marginBottom: 4 }}>Amount</label>
+                <input type="number" min="0.01" step="0.01" value={prodForm.amount}
+                  onChange={(e) => setProdForm((f) => ({ ...f, amount: e.target.value }))} style={{ width: 100 }} />
+              </div>
+              <button type="submit" disabled={prodLoading}>{prodLoading ? "…" : "Add product"}</button>
+            </form>
+            {prodMsg && <p className={prodMsg.includes("✅") ? "muted" : "error"} style={{ marginTop: 8 }}>{prodMsg}</p>}
+          </div>
+          {products.length === 0 && <p className="muted">No catalog products yet. Add denominations above so users can purchase vouchers.</p>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {products.map((p) => (
+              <div key={p.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
+                <div>
+                  <p style={{ fontWeight: 700 }}>{p.display_symbol} {formatMoney(p.amount)}</p>
+                  <p className="muted" style={{ fontSize: "0.78rem" }}>ID: {p.id.slice(0, 8)}…</p>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <StatusBadge status={p.is_active ? "active" : "disabled"} />
+                  <button
+                    onClick={() => toggleProduct(p.id)}
+                    style={{ fontSize: "0.78rem", background: p.is_active ? "var(--danger)" : "var(--accent)" }}
+                  >
+                    {p.is_active ? "Deactivate" : "Activate"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
