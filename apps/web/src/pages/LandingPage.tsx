@@ -3,325 +3,28 @@ import { Link, useNavigate } from "react-router-dom";
 import PublicLayout, { useReveal } from "../components/PublicLayout";
 import { NetworkCanvas } from "../components/NetworkCanvas";
 import { LoadingOverlay } from "../components/LoadingOverlay";
+import { SlideToAction } from "../components/SlideToAction";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HeroSection
 // ─────────────────────────────────────────────────────────────────────────────
 function HeroSection() {
   const navigate = useNavigate();
-  const heroRef = React.useRef<HTMLElement | null>(null);
-  const leftRef = React.useRef<HTMLAnchorElement | null>(null);
-  const rightRef = React.useRef<HTMLAnchorElement | null>(null);
-
   const [loading, setLoading] = React.useState(false);
-  const [active, setActive] = React.useState<null | "left" | "right">(null); // which balloon is armed/dragged
-  const [phase, setPhase] = React.useState<"idle" | "armed" | "dragging" | "burst">("idle");
-  const [pos, setPos] = React.useState<{ left: { x: number; y: number }; right: { x: number; y: number } }>(() => ({
-    left: { x: 0, y: 0 },
-    right: { x: 0, y: 0 },
-  }));
-  const [stretch, setStretch] = React.useState<{ left: number; right: number }>({ left: 0, right: 0 });
-  const [pressure, setPressure] = React.useState<{ left: number; right: number }>({ left: 0, right: 0 }); // 0..1 grows as we approach center
-  const [inflation, setInflation] = React.useState<{ left: number; right: number }>({ left: 0, right: 0 }); // aggressive near-center expansion
-  const [heroBurst, setHeroBurst] = React.useState<null | { id: number; x: number; y: number }>(null);
-  const heroBurstId = React.useRef(1);
-  const dragRef = React.useRef<{
-    side: "left" | "right";
-    pointerId: number;
-    startX: number;
-    startY: number;
-    baseX: number;
-    baseY: number;
-    startDist: number; // distance from balloon center to activation center at drag start
-  } | null>(null);
-  const centerZoneRef = React.useRef<{ x: number; y: number; r: number }>({ x: 0, y: 0, r: 74 });
-  const [ripples, setRipples] = React.useState<Array<{ id: number; x: number; y: number; strong: boolean }>>([]);
-  const rippleId = React.useRef(1);
 
-  const prefersReducedMotion = React.useMemo(() => {
-    if (typeof window === "undefined") return false;
-    return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
-  }, []);
-
-  const addRippleFrom = React.useCallback((el: HTMLElement | null, strong: boolean) => {
-    const hero = heroRef.current;
-    if (!hero || !el) return;
-    const hb = hero.getBoundingClientRect();
-    const eb = el.getBoundingClientRect();
-    const x = (eb.left + eb.width / 2) - hb.left;
-    const y = (eb.top + eb.height / 2) - hb.top;
-    const id = rippleId.current++;
-    setRipples((rs) => [...rs.slice(-3), { id, x, y, strong }]); // keep small for perf
-    window.setTimeout(() => {
-      setRipples((rs) => rs.filter((r) => r.id !== id));
-    }, strong ? 1300 : 1600);
-  }, []);
-
-  // Center activation zone (invisible): recalculated on resize for responsiveness.
-  React.useEffect(() => {
-    const hero = heroRef.current;
-    if (!hero) return;
-    const update = () => {
-      const hb = hero.getBoundingClientRect();
-      const mobile = hb.width < 768;
-      centerZoneRef.current = { x: hb.width / 2, y: hb.height / 2, r: mobile ? 60 : 78 };
-    };
-    update();
-    window.addEventListener("resize", update, { passive: true });
-    return () => window.removeEventListener("resize", update);
-  }, []);
-
-  // Idle ripples (soft, occasional) + gentle breathing is CSS-driven.
-  React.useEffect(() => {
-    if (prefersReducedMotion) return;
-    let t: ReturnType<typeof setTimeout> | null = null;
-    const loop = () => {
-      t = setTimeout(() => {
-        addRippleFrom(leftRef.current, false);
-        window.setTimeout(() => addRippleFrom(rightRef.current, false), 650);
-        loop();
-      }, 5200 + Math.floor(Math.random() * 4200));
-    };
-    loop();
-    return () => { if (t) clearTimeout(t); };
-  }, [addRippleFrom, prefersReducedMotion]);
-
-  const resetInteraction = React.useCallback(() => {
-    dragRef.current = null;
-    setPhase("idle");
-    setActive(null);
-    setStretch({ left: 0, right: 0 });
-    setPressure({ left: 0, right: 0 });
-    setInflation({ left: 0, right: 0 });
-    setPos({ left: { x: 0, y: 0 }, right: { x: 0, y: 0 } });
-  }, []);
-
-  const isInCenterZone = React.useCallback((side: "left" | "right") => {
-    const hero = heroRef.current;
-    const el = side === "left" ? leftRef.current : rightRef.current;
-    if (!hero || !el) return false;
-    const hb = hero.getBoundingClientRect();
-    const eb = el.getBoundingClientRect();
-    const cx = (eb.left + eb.width / 2) - hb.left;
-    const cy = (eb.top + eb.height / 2) - hb.top;
-    const z = centerZoneRef.current;
-    const dx = cx - z.x;
-    const dy = cy - z.y;
-    return (dx * dx + dy * dy) <= (z.r * z.r);
-  }, []);
-
-  const commitBurstAndNavigate = React.useCallback((side: "left" | "right") => {
-    setPhase("burst");
-    // Let the giant-bubble burst complete before starting the loading overlay.
-    window.setTimeout(() => setLoading(true), 900);
-    window.setTimeout(() => {
-      navigate(side === "left" ? "/register" : "/login");
-    }, 1180);
+  const goTo = React.useCallback((path: string) => {
+    setLoading(true);
+    window.setTimeout(() => navigate(path), 280);
   }, [navigate]);
 
-  const onBalloonPointerDown = (side: "left" | "right", e: React.PointerEvent<HTMLAnchorElement>) => {
-    // fallback: allow normal navigation when reduced motion requested
-    if (prefersReducedMotion) return;
-    if (loading) return;
-    e.preventDefault();
-
-    const el = side === "left" ? leftRef.current : rightRef.current;
-    if (!el) return;
-
-    setActive(side);
-    setPhase("armed");
-    setInflation((i) => ({ ...i, [side]: 0 }));
-    addRippleFrom(el, true); // strong hero-wide ripple on press/tap
-
-    try { el.setPointerCapture(e.pointerId); } catch {}
-
-    // Compute initial distance to center zone for progressive growth mapping
-    const hero = heroRef.current;
-    const hb = hero?.getBoundingClientRect();
-    const eb = el.getBoundingClientRect();
-    const cx = hb ? (eb.left + eb.width / 2) - hb.left : 0;
-    const cy = hb ? (eb.top + eb.height / 2) - hb.top : 0;
-    const z = centerZoneRef.current;
-    const dx0 = cx - z.x;
-    const dy0 = cy - z.y;
-    const startDist = Math.max(1, Math.sqrt(dx0 * dx0 + dy0 * dy0));
-
-    dragRef.current = {
-      side,
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      baseX: pos[side].x,
-      baseY: pos[side].y,
-      startDist,
-    };
-  };
-
-  const onBalloonPointerMove = (e: React.PointerEvent<HTMLAnchorElement>) => {
-    const d = dragRef.current;
-    if (!d || d.pointerId !== e.pointerId) return;
-    if (phase === "burst") return;
-    setPhase("dragging");
-
-    const dx = e.clientX - d.startX;
-    const dy = e.clientY - d.startY;
-    setPos((p) => ({ ...p, [d.side]: { x: d.baseX + dx, y: d.baseY + dy } }));
-
-    const mag = Math.min(1, Math.sqrt(dx * dx + dy * dy) / 240);
-    setStretch((s) => ({ ...s, [d.side]: mag }));
-
-    // Pressure growth: increases as balloon approaches activation zone center
-    const hero = heroRef.current;
-    const el = d.side === "left" ? leftRef.current : rightRef.current;
-    if (hero && el) {
-      const hb = hero.getBoundingClientRect();
-      const eb = el.getBoundingClientRect();
-      const cx = (eb.left + eb.width / 2) - hb.left;
-      const cy = (eb.top + eb.height / 2) - hb.top;
-      const z = centerZoneRef.current;
-      const dxC = cx - z.x;
-      const dyC = cy - z.y;
-      const dist = Math.sqrt(dxC * dxC + dyC * dyC);
-      const progress = 1 - Math.min(1, dist / d.startDist); // 0 far → 1 near
-      // Start visible growth immediately from first drag movement.
-      const eased = Math.pow(progress, 0.88);
-      setPressure((p) => ({ ...p, [d.side]: eased }));
-
-      // Final inflation phase starts earlier, then ramps sharply near center.
-      const near = Math.max(0, (progress - 0.48) / 0.52); // 0..1 from mid-drag onward
-      const inflated = Math.pow(near, 2.25);
-      setInflation((i) => ({ ...i, [d.side]: inflated }));
-    }
-
-    if (isInCenterZone(d.side)) {
-      dragRef.current = null;
-      setStretch((s) => ({ ...s, [d.side]: 0 }));
-      setPressure((p) => ({ ...p, [d.side]: 1 }));
-      setInflation((i) => ({ ...i, [d.side]: 1 }));
-
-      // Fire a dedicated burst in the visual center of the hero (not at the balloon's last pixel)
-      const z = centerZoneRef.current;
-      const id = heroBurstId.current++;
-      setHeroBurst({ id, x: z.x, y: z.y });
-      window.setTimeout(() => {
-        setHeroBurst((b) => (b?.id === id ? null : b));
-      }, 900);
-
-      commitBurstAndNavigate(d.side);
-    }
-  };
-
-  const balloonVars = (side: "left" | "right") => {
-    const p = side === "left" ? pressure.left : pressure.right;
-    const st = side === "left" ? stretch.left : stretch.right;
-    const inf = side === "left" ? inflation.left : inflation.right;
-    const x = side === "left" ? pos.left.x : pos.right.x;
-    const y = side === "left" ? pos.left.y : pos.right.y;
-
-    const sx = (1 + st * 0.10 + p * 0.34) * (1 + inf * 10.8);
-    const sy = (1 - st * 0.04 + p * 0.30) * (1 + inf * 10.4);
-
-    return {
-      ["--dx" as any]: `${x}px`,
-      ["--dy" as any]: `${y}px`,
-      ["--sx" as any]: String(sx),
-      ["--sy" as any]: String(sy),
-      ["--tsx" as any]: String(1 / sx), // inverse scales keep label visually constant
-      ["--tsy" as any]: String(1 / sy),
-      ["--inflate" as any]: String(inf),
-    };
-  };
-
-  const onBalloonPointerUp = (e: React.PointerEvent<HTMLAnchorElement>) => {
-    const d = dragRef.current;
-    if (!d || d.pointerId !== e.pointerId) return;
-    dragRef.current = null;
-    const side = d.side;
-
-    if (phase === "burst") return;
-    setStretch((s) => ({ ...s, [side]: 0 }));
-    setPressure((p) => ({ ...p, [side]: 0 }));
-
-    if (isInCenterZone(side)) {
-      commitBurstAndNavigate(side);
-      return;
-    }
-
-    // Not activated: return to origin and reset (no loading, no navigation).
-    // User can try again with a fresh tap+drag gesture.
-    setPos((p) => ({ ...p, [side]: { x: 0, y: 0 } }));
-    setInflation((i) => ({ ...i, [side]: 0 }));
-    setActive(null);
-    setPhase("idle");
-  };
-
   return (
-    <section className="lp-hero" ref={(n) => { heroRef.current = n; }}>
+    <section className="lp-hero">
       {/* Network particle background */}
       <NetworkCanvas />
       <div className="hero-grid" />
       <div className="hero-orb hero-orb-1" />
       <div className="hero-orb hero-orb-2" />
       <div className="hero-orb hero-orb-3" />
-
-      {/* Hero-wide ripple field (visual only; never blocks content) */}
-      <div className="hero-ripple-field" aria-hidden="true">
-        {ripples.map((r) => (
-          <span
-            key={r.id}
-            className={`hero-ripple-field-wave${r.strong ? " strong" : ""}`}
-            style={{ left: r.x, top: r.y }}
-          />
-        ))}
-        {heroBurst ? (
-          <span className="hero-burst" style={{ left: heroBurst.x, top: heroBurst.y }} />
-        ) : null}
-      </div>
-
-      {/* Water balloon CTAs (overlay; does not alter hero layout/typography) */}
-      <div className={`hero-water-ctas${loading ? " disabled" : ""}`} aria-hidden={loading ? "true" : "false"}>
-        <Link
-          to="/register"
-          ref={leftRef}
-          className={`water-balloon left${active === "left" ? " active" : ""} phase-${phase}${active === "left" && phase === "dragging" && pressure.left > 0.62 ? " pressurized" : ""}${active === "left" && phase === "dragging" && inflation.left > 0.15 ? " flooding" : ""}`}
-          style={balloonVars("left")}
-          // Critical: a click/tap alone must NEVER navigate.
-          // Navigation is only triggered programmatically after drag-to-center burst.
-          onClick={(e) => e.preventDefault()}
-          onPointerDown={(e) => onBalloonPointerDown("left", e)}
-          onPointerMove={onBalloonPointerMove}
-          onPointerUp={onBalloonPointerUp}
-          onPointerCancel={onBalloonPointerUp}
-          aria-label="Ripple here to get started"
-        >
-          <span className="wb-shimmer" aria-hidden="true" />
-          <span className="wb-highlight" aria-hidden="true" />
-          <span className="wb-text">Ripple here to get started</span>
-          <span className="wb-arrow" aria-hidden="true">→</span>
-          <span className="wb-burst" aria-hidden="true" />
-        </Link>
-
-        <Link
-          to="/login"
-          ref={rightRef}
-          className={`water-balloon right${active === "right" ? " active" : ""} phase-${phase}${active === "right" && phase === "dragging" && pressure.right > 0.62 ? " pressurized" : ""}${active === "right" && phase === "dragging" && inflation.right > 0.15 ? " flooding" : ""}`}
-          style={balloonVars("right")}
-          // Critical: a click/tap alone must NEVER navigate.
-          // Navigation is only triggered programmatically after drag-to-center burst.
-          onClick={(e) => e.preventDefault()}
-          onPointerDown={(e) => onBalloonPointerDown("right", e)}
-          onPointerMove={onBalloonPointerMove}
-          onPointerUp={onBalloonPointerUp}
-          onPointerCancel={onBalloonPointerUp}
-          aria-label="Ripple here to login"
-        >
-          <span className="wb-shimmer" aria-hidden="true" />
-          <span className="wb-highlight" aria-hidden="true" />
-          <span className="wb-text">Ripple here to login</span>
-          <span className="wb-arrow" aria-hidden="true">←</span>
-          <span className="wb-burst" aria-hidden="true" />
-        </Link>
-      </div>
 
       <div className="hero-content">
         <div className="hero-badge">
@@ -355,6 +58,20 @@ function HeroSection() {
         <p style={{ marginTop: 8, fontSize: ".78rem", color: "var(--lp-sub)", opacity: 0.6, letterSpacing: ".04em", textTransform: "uppercase" }}>
           Infrastructure for XRPL stablecoin adoption
         </p>
+
+        {/* Slider CTAs — replace balloon/ripple interaction */}
+        <div className="hero-sliders">
+          <SlideToAction
+            label="slide to register"
+            onComplete={() => goTo("/register")}
+            disabled={loading}
+          />
+          <SlideToAction
+            label="slide to login"
+            onComplete={() => goTo("/login")}
+            disabled={loading}
+          />
+        </div>
       </div>
 
       <div className="hero-scroll">
@@ -362,7 +79,6 @@ function HeroSection() {
         scroll
       </div>
 
-      {/* Existing loading overlay — used as the post-burst transition */}
       <LoadingOverlay visible={loading} />
     </section>
   );
@@ -522,7 +238,7 @@ function DeveloperSection() {
       `}<span className="cs">"Authorization"</span>{`: `}<span className="cs">{"`Bearer ${token}`"}</span>{`,
     },
     body: `}<span className="cf">JSON.stringify</span>{`({
-      to_user_id:   `}<span className="cs">"&lt;uuid&gt;"</span>{`,
+      recipient:    `}<span className="cs">"alice_pay"</span>{`,   `}<span className="cm">// username or UUID</span>{`
       asset_id:     `}<span className="cs">"&lt;rlusd-id&gt;"</span>{`,
       gross_amount: `}<span className="cn">25</span>{`,  `}<span className="cm">// $25.00 RLUSD</span>{`
     }),

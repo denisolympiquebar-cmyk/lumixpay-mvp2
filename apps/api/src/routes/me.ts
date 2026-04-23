@@ -53,9 +53,11 @@ router.post("/username", authenticate, async (req, res) => {
   const { username } = parsed.data;
 
   try {
-    // Check uniqueness excluding the requesting user
+    // Case-insensitive uniqueness check excluding the requesting user.
+    // LOWER() on both sides ensures no CI collision even if the DB were to
+    // contain mixed-case entries (belt-and-suspenders alongside idx_users_username_ci).
     const { rows: existing } = await pool.query<{ id: string }>(
-      "SELECT id FROM users WHERE username = $1 AND id != $2",
+      "SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND id != $2",
       [username, req.user!.sub]
     );
     if (existing.length > 0) {

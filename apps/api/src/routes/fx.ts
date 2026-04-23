@@ -8,6 +8,7 @@ import { idempotent } from "../middleware/idempotency";
 import { pool, withTransaction } from "../db/pool";
 import { Account } from "../db/types";
 import { notificationService } from "../services/NotificationService";
+import { config } from "../config";
 
 const router = Router();
 
@@ -58,6 +59,8 @@ router.get("/all", async (_req, res) => {
 });
 
 // ── POST /convert  — convert between assets ────────────────────────────────────
+// NOTE: this router is mounted at app.use("/convert", fxRouter) in index.ts.
+// Express strips the mount prefix, so this handler must use path "/" (not "/convert").
 
 const ConvertSchema = z.object({
   from_asset_id: z.string().uuid(),
@@ -65,7 +68,7 @@ const ConvertSchema = z.object({
   amount:        z.number().positive(),
 });
 
-router.post("/convert", authenticate, requireNotFrozen, idempotent, async (req, res) => {
+router.post("/", authenticate, requireNotFrozen, idempotent, async (req, res) => {
   const parsed = ConvertSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
@@ -120,46 +123,87 @@ router.post("/convert", authenticate, requireNotFrozen, idempotent, async (req, 
         );
       }
 
-      // 4. Post two ledger entries: debit from_account, credit to_account
+      // 4. Resolve FLOAT accounts for each asset — they act as the cross-currency bridge.
+      //    Leg 1 (out): fromAcc  → FLOAT_from  (user gives source asset to float)
+      //    Leg 2 (in):  FLOAT_to → toAcc       (float gives destination asset to user)
+      const sysAcc    = config.system.accounts;
+      const floatFromId = from_asset_id === sysAcc.rlusd.assetId
+        ? sysAcc.rlusd.float
+        : sysAcc.eurq.float;
+      const floatToId = to_asset_id === sysAcc.rlusd.assetId
+        ? sysAcc.rlusd.float
+        : sysAcc.eurq.float;
+
+      // Lock FLOAT balances for UPDATE so concurrent FX requests don't race
+      await client.query(
+        "SELECT available FROM balances WHERE account_id = ANY($1) FOR UPDATE",
+        [[floatFromId, floatToId]]
+      );
+
+      // Verify FLOAT_to has enough to pay out
+      const { rows: floatToBalRows } = await client.query<{ available: string }>(
+        "SELECT available FROM balances WHERE account_id = $1",
+        [floatToId]
+      );
+      const floatToAvail = new Decimal(floatToBalRows[0]?.available ?? "0");
+      if (floatToAvail.lt(toAmt)) {
+        throw Object.assign(
+          new Error("Insufficient platform liquidity for this conversion. Try again later."),
+          { status: 503 }
+        );
+      }
+
+      // 5. Post two ledger entries using real debit ≠ credit accounts
       const conversionId   = uuidv4();
       const idempKeyDebit  = `fx:${conversionId}:debit`;
       const idempKeyCredit = `fx:${conversionId}:credit`;
 
+      // Leg 1 — from-asset "out": user → FLOAT_from
       await client.query(
         `INSERT INTO ledger_entries
            (idempotency_key, debit_account_id, credit_account_id, asset_id, amount,
             entry_type, reference_id, reference_type, metadata)
-         VALUES ($1, $2, $2, $3, $4, 'fx_conversion', $5, 'fx_conversion', $6)`,
+         VALUES ($1, $2, $3, $4, $5, 'fx_conversion', $6, 'fx_conversion', $7)`,
         [
           idempKeyDebit,
-          fromAcc.id,
-          fromAcc.id,
-          from_asset_id,
-          fromAmt.toFixed(6),
-          conversionId,
-          JSON.stringify({ direction: "out", rate: rate.toString(), to_asset: to_asset_id }),
-        ]
-      );
-      await client.query(
-        `INSERT INTO ledger_entries
-           (idempotency_key, debit_account_id, credit_account_id, asset_id, amount,
-            entry_type, reference_id, reference_type, metadata)
-         VALUES ($1, $2, $2, $3, $4, 'fx_conversion', $5, 'fx_conversion', $6)`,
-        [
-          idempKeyCredit,
-          toAcc.id,
-          toAcc.id,
-          to_asset_id,
-          toAmt.toFixed(6),
-          conversionId,
-          JSON.stringify({ direction: "in", rate: rate.toString(), from_asset: from_asset_id }),
+          fromAcc.id,         // $2 debit  — user's source account loses from-asset
+          floatFromId,        // $3 credit — system FLOAT gains from-asset
+          from_asset_id,      // $4
+          fromAmt.toFixed(6), // $5
+          conversionId,       // $6
+          JSON.stringify({ direction: "out", rate: rate.toString(), to_asset: to_asset_id }), // $7
         ]
       );
 
-      // 5. Update balances
+      // Leg 2 — to-asset "in": FLOAT_to → user
+      await client.query(
+        `INSERT INTO ledger_entries
+           (idempotency_key, debit_account_id, credit_account_id, asset_id, amount,
+            entry_type, reference_id, reference_type, metadata)
+         VALUES ($1, $2, $3, $4, $5, 'fx_conversion', $6, 'fx_conversion', $7)`,
+        [
+          idempKeyCredit,
+          floatToId,          // $2 debit  — system FLOAT gives to-asset
+          toAcc.id,           // $3 credit — user's destination account gains to-asset
+          to_asset_id,        // $4
+          toAmt.toFixed(6),   // $5
+          conversionId,       // $6
+          JSON.stringify({ direction: "in", rate: rate.toString(), from_asset: from_asset_id }), // $7
+        ]
+      );
+
+      // 6. Update all four affected balances atomically
       await client.query(
         "UPDATE balances SET available = available - $1, updated_at = NOW() WHERE account_id = $2",
         [fromAmt.toFixed(6), fromAcc.id]
+      );
+      await client.query(
+        "UPDATE balances SET available = available + $1, updated_at = NOW() WHERE account_id = $2",
+        [fromAmt.toFixed(6), floatFromId]
+      );
+      await client.query(
+        "UPDATE balances SET available = available - $1, updated_at = NOW() WHERE account_id = $2",
+        [toAmt.toFixed(6), floatToId]
       );
       await client.query(
         "UPDATE balances SET available = available + $1, updated_at = NOW() WHERE account_id = $2",

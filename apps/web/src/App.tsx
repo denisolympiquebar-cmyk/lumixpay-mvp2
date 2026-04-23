@@ -10,6 +10,7 @@ import { useStream } from "./lib/use-stream";
 import "./dashboard.css";
 import LandingPage      from "./pages/LandingPage";
 import { LoadingOverlay } from "./components/LoadingOverlay";
+import { SlideToAction } from "./components/SlideToAction";
 import PricingPage      from "./pages/PricingPage";
 import DevelopersPage   from "./pages/DevelopersPage";
 import DocsPage         from "./pages/DocsPage";
@@ -380,6 +381,7 @@ const ERROR_FRIENDLY: Record<string, string> = {
   RATE_LIMITED:            "Too many requests. Please wait a moment and try again.",
   INVALID_VOUCHER:         "This voucher code is invalid or has already been redeemed.",
   VOUCHER_USED:            "This voucher has already been redeemed.",
+  RECIPIENT_NOT_FOUND:     "Recipient not found. Check the username or user ID and try again.",
   NOT_FOUND:               "The requested resource was not found.",
   UNAUTHORIZED:            "Your session has expired. Please log in again.",
   SETTLEMENT_IN_FLIGHT:    "Settlement is already in progress for this withdrawal.",
@@ -771,12 +773,18 @@ function DashboardPage() {
           );
           const incoming = acc && e.credit_account_id === acc.id;
           const icon = ENTRY_ICON[e.entry_type] ?? "·";
+          const counterpartyLabel = e.entry_type === "transfer" && e.counterparty
+            ? (incoming ? "from " : "to ") + (e.counterparty.username ? `@${e.counterparty.username}` : `${e.counterparty.id.slice(0, 8)}…`)
+            : null;
           return (
             <div key={e.id} className="activity-row">
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.85rem", flexShrink: 0 }}>{icon}</span>
                 <div>
                   <div className="activity-type">{ENTRY_LABEL[e.entry_type] ?? e.entry_type}</div>
+                  {counterpartyLabel && (
+                    <div className="activity-time" style={{ fontWeight: 500 }}>{counterpartyLabel}</div>
+                  )}
                   <div className="activity-time">{new Date(e.created_at).toLocaleString()}</div>
                 </div>
               </div>
@@ -821,10 +829,23 @@ function TopUpPage() {
   const handleConfirm = async () => {
     setErrorMsg("");
     setLoading(true);
+
+    // Generate the idempotency key BEFORE entering the try block so that:
+    //  a) it is never silently swallowed if crypto.randomUUID() throws
+    //  b) the diagnostic log always fires before the network request
+    const idempotencyKey = generateIdempotencyKey();
+    console.log("[TopUp] Sending POST /topup", {
+      endpoint: "/topup",
+      method: "POST",
+      "Idempotency-Key": idempotencyKey
+        ? `present (${idempotencyKey.length} chars, prefix: ${idempotencyKey.slice(0, 8)})`
+        : "MISSING — request will be rejected by backend",
+    });
+
     try {
       await apiFetch("/topup", token, {
         method: "POST",
-        headers: { "Idempotency-Key": generateIdempotencyKey() },
+        headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ asset_id: assetId, gross_amount: amount, simulated_card_last4: last4 }),
       });
       await refresh();
@@ -962,7 +983,7 @@ function TransferPage() {
   const navigate = useNavigate();
 
   const [assetId, setAssetId] = useState<string>("");
-  const [toUserId, setToUserId] = useState<string>("");
+  const [recipient, setRecipient] = useState<string>("");
   const [grossAmount, setGrossAmount] = useState<number>(10);
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<"form" | "confirm" | "success">("form");
@@ -981,10 +1002,17 @@ function TransferPage() {
   const handleConfirm = async () => {
     setErrorMsg("");
     setLoading(true);
+    const idempotencyKey = generateIdempotencyKey();
+    console.log("[Transfer] Sending POST /transfers", {
+      endpoint: "/transfers",
+      method: "POST",
+      "Idempotency-Key": `present (${idempotencyKey.slice(0, 8)}…)`,
+    });
     try {
       const res = await apiFetch<any>("/transfers", token, {
         method: "POST",
-        body: JSON.stringify({ to_user_id: toUserId.trim(), asset_id: assetId, gross_amount: grossAmount }),
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify({ recipient: recipient.trim(), asset_id: assetId, gross_amount: grossAmount }),
       });
       await refresh();
       void refreshNotifs();
@@ -1031,14 +1059,16 @@ function TransferPage() {
             </div>
 
             <div className="form-field">
-              <label className="form-label">Recipient user ID</label>
+              <label className="form-label">Recipient (User ID or username)</label>
               <input
-                placeholder="Paste recipient user ID (UUID)"
-                value={toUserId}
-                onChange={(e) => setToUserId(e.target.value)}
+                placeholder="e.g. alice_pay or paste a user ID (UUID)"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
                 required
               />
-              <span className="form-hint">You can find someone's user ID on their profile page.</span>
+              <span className="form-hint">Enter a username (e.g. alice_pay) or paste a user ID. Ask the recipient to share their username from their Profile page.</span>
             </div>
 
             <div className="form-field">
@@ -1063,7 +1093,7 @@ function TransferPage() {
 
             <button
               onClick={() => setStep("confirm")}
-              disabled={!assetId || !toUserId.trim() || grossAmount <= 0 || !!exceedsBalance}
+              disabled={!assetId || !recipient.trim() || grossAmount <= 0 || !!exceedsBalance}
             >
               Review Transfer
             </button>
@@ -1077,7 +1107,7 @@ function TransferPage() {
           <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 14 }}>Transfers are instant and cannot be reversed.</p>
           <div className="confirm-panel">
             <ConfirmRow label="Currency" value={selectedAcc?.asset.display_name ?? assetId} />
-            <ConfirmRow label="Recipient" value={<code style={{ fontSize: "0.77rem", wordBreak: "break-all" }}>{toUserId.trim()}</code>} />
+            <ConfirmRow label="Recipient" value={<code style={{ fontSize: "0.77rem", wordBreak: "break-all" }}>{recipient.trim()}</code>} />
             <ConfirmRow label="Gross amount" value={`${grossAmount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
             <ConfirmRow label="Platform fee (1%)" value={`${xferCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
             <ConfirmRow label="Recipient receives" value={`${xferCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
@@ -1088,9 +1118,13 @@ function TransferPage() {
             <button onClick={() => setStep("form")} style={{ background: "var(--surface)", border: "1px solid var(--border)", flex: 1 }}>
               Edit
             </button>
-            <button onClick={handleConfirm} disabled={loading} style={{ flex: 2 }}>
-              {loading ? "Sending..." : `Confirm - Send ${xferCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`}
-            </button>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <SlideToAction
+              label="slide to confirm transfer"
+              onComplete={handleConfirm}
+              disabled={loading}
+            />
           </div>
         </div>
       )}
@@ -1105,7 +1139,7 @@ function TransferPage() {
             </div>
             <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
               <button
-                onClick={() => { setStep("form"); setSuccessData(null); setErrorMsg(""); setToUserId(""); setGrossAmount(10); }}
+                onClick={() => { setStep("form"); setSuccessData(null); setErrorMsg(""); setRecipient(""); setGrossAmount(10); }}
                 style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
               >
                 Send again
@@ -1265,6 +1299,9 @@ function WithdrawPage() {
             <ConfirmRow label="Settlement" value={<span className="settle-tag on-chain">XRPL (Phase 2)</span>} />
           </div>
           <InlineHelp>Net amount is locked in escrow. A LumixPay operator will review and approve before on-chain settlement.</InlineHelp>
+          <p className="muted" style={{ fontSize: "0.75rem", margin: "10px 0 0", padding: "7px 10px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+            ⚠ Settlement is currently simulated in this phase. Status and any transaction hash shown are mock outputs. Live XRPL settlement will be enabled in a future phase.
+          </p>
           <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
             <button onClick={() => setStep("form")} style={{ background: "var(--surface)", border: "1px solid var(--border)", flex: 1 }}>
               Edit
@@ -1421,6 +1458,9 @@ function HistoryPage() {
           const sign = incoming ? "+" : "−";
           const color = incoming ? "var(--success)" : "var(--muted)";
           const icon = ENTRY_ICON[e.entry_type] ?? "·";
+          const counterpartyLabel = e.entry_type === "transfer" && e.counterparty
+            ? (incoming ? "From " : "To ") + (e.counterparty.username ? `@${e.counterparty.username}` : `${e.counterparty.id.slice(0, 8)}…`)
+            : null;
           return (
             <div
               key={e.id}
@@ -1433,6 +1473,9 @@ function HistoryPage() {
                   <p style={{ fontWeight: 600, fontSize: "0.9rem" }}>
                     {ENTRY_LABEL[e.entry_type] ?? e.entry_type}
                   </p>
+                  {counterpartyLabel && (
+                    <p className="muted" style={{ fontSize: "0.73rem", fontWeight: 500 }}>{counterpartyLabel}</p>
+                  )}
                   <p className="muted" style={{ fontSize: "0.73rem" }}>{new Date(e.created_at).toLocaleString()}</p>
                 </div>
               </div>
@@ -1533,6 +1576,11 @@ function AdminWithdrawalsPage() {
           Back
         </button>
       </header>
+
+      {/* Settlement phase notice */}
+      <p className="muted" style={{ fontSize: "0.78rem", marginBottom: 14, padding: "8px 12px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+        ⚠ Settlement is currently simulated (Phase 1). Status transitions and any tx hash shown are mock outputs. Live XRPL settlement will be enabled in Phase 2.
+      </p>
 
       {/* Status filter tabs */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
@@ -1795,7 +1843,9 @@ function NotificationsPage() {
           ) : null}
         </div>
         <p className="muted" style={{ fontSize: "0.75rem", marginTop: 10, marginBottom: 0 }}>
-          Push is always user-enabled. If your browser blocks notifications, enable them in site settings and try again.
+          Push is always user-enabled. If setup fails, check that notifications are allowed in your browser site settings.
+          Some environments block push by default — including Brave Shields, iOS Safari (requires the app to be installed as a PWA first), and private/incognito windows.
+          For the most reliable experience use Chrome or Firefox on desktop.
         </p>
       </div>
 
@@ -1959,31 +2009,48 @@ function ProfilePage() {
         <p><span className="muted">Email:</span> <strong>{profile?.email}</strong></p>
         <p><span className="muted">Full name:</span> <strong>{profile?.full_name}</strong></p>
         <p><span className="muted">Role:</span> <strong>{profile?.role}</strong></p>
+        <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+        <div>
+          <p className="muted" style={{ marginBottom: 6 }}>
+            <strong style={{ color: "var(--text)" }}>Username</strong>
+            {" — "}share this so others can send you money directly
+          </p>
+          {profile?.username ? (
+            <p style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <code style={{ fontSize: "0.95rem", fontWeight: 600 }}>@{profile.username}</code>
+              <CopyButton text={profile.username} />
+            </p>
+          ) : (
+            <p className="muted" style={{ fontSize: "0.83rem", marginBottom: 8 }}>
+              No username set — set one below so others can send you transfers by name.
+            </p>
+          )}
+          <form onSubmit={saveUsername} style={{ display: "flex", gap: 10 }}>
+            <input
+              placeholder="e.g. alice_pay"
+              value={username}
+              onChange={(e) => setUsername(e.target.value.toLowerCase())}
+              pattern="[a-z0-9_]{3,30}"
+              title="3-30 chars: lowercase letters, digits, underscores"
+              style={{ flex: 1 }}
+            />
+            <button type="submit" disabled={loading}>{loading ? "…" : "Save"}</button>
+          </form>
+          {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
+        </div>
+        <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "4px 0" }} />
         <p style={{ wordBreak: "break-all" }}>
-          <span className="muted">User ID:</span>{" "}
-          <code style={{ fontSize: "0.8rem" }}>{profile?.id}</code>
+          <span className="muted" style={{ fontSize: "0.82rem" }}>User ID (for advanced use):</span>{" "}
+          <code style={{ fontSize: "0.75rem", opacity: 0.7 }}>{profile?.id}</code>
           {profile?.id && <CopyButton text={profile.id} />}
         </p>
-        <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "8px 0" }} />
-        <p className="muted">Username (used for contacts &amp; payments)</p>
-        <form onSubmit={saveUsername} style={{ display: "flex", gap: 10 }}>
-          <input
-            placeholder="e.g. alice_pay"
-            value={username}
-            onChange={(e) => setUsername(e.target.value.toLowerCase())}
-            pattern="[a-z0-9_]{3,30}"
-            title="3-30 chars: lowercase letters, digits, underscores"
-            style={{ flex: 1 }}
-          />
-          <button type="submit" disabled={loading}>{loading ? "…" : "Save"}</button>
-        </form>
-        {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
       </div>
 
       <div className="card" style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 12 }}>
         <h3 style={{ margin: 0, fontSize: "1.05rem" }}>XRPL wallet (optional)</h3>
         <p className="muted" style={{ margin: 0, fontSize: "0.88rem", lineHeight: 1.5 }}>
-          Your LumixPay account stays primary (email and password). Optional: connect an XRPL Testnet wallet for future on-chain settlement and withdrawal flows.
+          Your LumixPay account stays primary (email and password). Optionally link an XRPL Testnet wallet to store a verified address for future on-chain settlement flows.{" "}
+          <strong>Linking does not perform any on-chain transactions, deposits, or withdrawals in the current phase.</strong>
         </p>
 
         {hasWallet ? (
@@ -3282,28 +3349,55 @@ function ExchangePage() {
   }, [accounts, fromAssetId, toAssetId]);
 
   useEffect(() => {
+    const fromAcc_ = accounts.find((a) => a.asset_id === fromAssetId);
+    const available_ = fromAcc_ ? parseFloat(String(fromAcc_.balance.available)) : null;
     if (!fromAssetId || !toAssetId || !amount || fromAssetId === toAssetId) {
+      console.log("[Exchange] estimate skipped", { fromAssetId, toAssetId, amount, sameAsset: fromAssetId === toAssetId });
       setEstimate(null); setEstimateRaw(null); return;
     }
     const rate = rates.find((r) => r.base_asset_id === fromAssetId && r.quote_asset_id === toAssetId);
-    if (!rate) { setEstimate(null); setEstimateRaw(null); return; }
-    const est = (parseFloat(amount) * parseFloat(rate.rate)).toFixed(2);
+    const est = rate ? (parseFloat(amount) * parseFloat(rate.rate)).toFixed(2) : null;
     const toSymbol = accounts.find((a) => a.asset_id === toAssetId)?.asset.display_symbol ?? "";
+    const canReview = !!est && !!available_ && parseFloat(amount) <= available_;
+    console.log("[Exchange] state", {
+      fromAssetId, toAssetId, amount,
+      available: available_,
+      rateFound: !!rate,
+      preview: est ? `${est} ${toSymbol}` : null,
+      canReview,
+    });
+    if (!rate) { setEstimate(null); setEstimateRaw(null); return; }
     setEstimate(`~${est} ${toSymbol}`);
-    setEstimateRaw({ est, toSymbol });
+    setEstimateRaw({ est: est!, toSymbol });
   }, [fromAssetId, toAssetId, amount, rates, accounts]);
 
   const handleConvert = async () => {
     setErrorMsg(""); setLoading(true);
+
+    const payload = {
+      from_asset_id: fromAssetId,
+      to_asset_id:   toAssetId,
+      amount:        parseFloat(amount),
+    };
+    const idempotencyKey = generateIdempotencyKey();
+    console.log("[Exchange] Sending POST /convert", {
+      endpoint: "/convert",
+      method:   "POST",
+      payload,
+      "Idempotency-Key": `present (${idempotencyKey.slice(0, 8)}…)`,
+    });
+
     try {
       const d = await apiFetch<{ conversion: any }>("/convert", token, {
-        method: "POST",
-        body: JSON.stringify({ from_asset_id: fromAssetId, to_asset_id: toAssetId, amount: parseFloat(amount) }),
+        method:  "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body:    JSON.stringify(payload),
       });
       await refresh();
       setSuccessMsg(`${d.conversion.from_amount} ${d.conversion.from_code} converted to ${d.conversion.to_amount} ${d.conversion.to_code}`);
       setStep("success");
     } catch (err: any) {
+      console.error("[Exchange] POST /convert failed:", err);
       const msg = friendlyError(err);
       setErrorMsg(msg);
       setStep("form");
@@ -3333,7 +3427,19 @@ function ExchangePage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div className="form-field">
               <label className="form-label">From</label>
-              <select value={fromAssetId} onChange={(e) => setFromAssetId(e.target.value)} required>
+              <select
+                value={fromAssetId}
+                onChange={(e) => {
+                  const newFrom = e.target.value;
+                  setFromAssetId(newFrom);
+                  // If the new source equals the current destination, auto-pick a different destination
+                  if (newFrom === toAssetId) {
+                    const other = accounts.find((a) => a.asset_id !== newFrom);
+                    if (other) setToAssetId(other.asset_id);
+                  }
+                }}
+                required
+              >
                 {accounts.map((a) => (
                   <option key={a.id} value={a.asset_id}>
                     {a.asset.display_symbol} &mdash; {formatMoney(a.balance.available)} available

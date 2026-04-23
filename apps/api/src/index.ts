@@ -37,6 +37,10 @@ import { pool } from "./db/pool";
 
 const app = express();
 
+// Required when running behind Fly.io / any reverse proxy so that
+// express-rate-limit and req.ip see the real client IP, not the proxy IP.
+app.set("trust proxy", 1);
+
 app.use(helmet());
 // Harden CORS: explicit allow-list only (comma-separated).
 // Use "*" only if explicitly set to "*" (backward compatible for dev).

@@ -404,30 +404,52 @@ export class LedgerService {
 
     void (async () => {
       try {
-        const currency = this.getCurrencyCode(assetId);
+        const currency  = this.getCurrencyCode(assetId);
+        const netAmount = result.transfer.net_amount;
         const meta = { transfer_id: result.transfer.id, amount: result.transfer.gross_amount, currency };
+
+        // Resolve account → user_id for both sides
         const [senderRes, recipRes] = await Promise.all([
           pool.query<{ user_id: string }>("SELECT user_id FROM accounts WHERE id = $1", [fromAccountId]),
           pool.query<{ user_id: string }>("SELECT user_id FROM accounts WHERE id = $1", [toAccountId]),
         ]);
         const senderUserId    = senderRes.rows[0]?.user_id;
         const recipientUserId = recipRes.rows[0]?.user_id;
+
+        // Fetch display identities in one batch query (username preferred, UUID fallback)
+        const idsToFetch = [senderUserId, recipientUserId].filter((id): id is string => !!id);
+        const usernameMap = new Map<string, string | null>();
+        if (idsToFetch.length > 0) {
+          const { rows: userRows } = await pool.query<{ id: string; username: string | null }>(
+            "SELECT id, username FROM users WHERE id = ANY($1::uuid[])",
+            [idsToFetch],
+          );
+          for (const u of userRows) usernameMap.set(u.id, u.username);
+        }
+
+        const formatIdentity = (userId: string) => {
+          const username = usernameMap.get(userId);
+          return username ? `@${username}` : userId;
+        };
+
         if (senderUserId) {
+          const recipientDisplay = recipientUserId ? formatIdentity(recipientUserId) : "unknown";
           await notificationService.create({
             userId: senderUserId,
             type: "transfer.sent",
             title: "Transfer sent",
-            body: `You sent ${result.transfer.gross_amount} ${currency} (recipient received ${result.transfer.net_amount})`,
+            body: `You sent ${netAmount} ${currency} to ${recipientDisplay}`,
             metadata: meta,
           });
           void this.publishBalancesAndActivity(senderUserId, fromAccountId, result.entries[0] ?? null);
         }
         if (recipientUserId && recipientUserId !== senderUserId) {
+          const senderDisplay = senderUserId ? formatIdentity(senderUserId) : "unknown";
           await notificationService.create({
             userId: recipientUserId,
             type: "transfer.received",
             title: "Transfer received",
-            body: `You received ${result.transfer.net_amount} ${currency}`,
+            body: `You received ${netAmount} ${currency} from ${senderDisplay}`,
             metadata: meta,
           });
           void this.publishBalancesAndActivity(recipientUserId, toAccountId, result.entries[0] ?? null);

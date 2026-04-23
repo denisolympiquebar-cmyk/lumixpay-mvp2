@@ -7,6 +7,35 @@ declare const self: ServiceWorkerGlobalScope;
 precacheAndRoute(self.__WB_MANIFEST);
 cleanupOutdatedCaches();
 
+// ── Lifecycle: activate immediately ──────────────────────────────────────────
+//
+// Without skipWaiting() the new SW stays in "waiting" until every tab running
+// the old SW is closed.  That makes navigator.serviceWorker.ready hang
+// indefinitely, which breaks push-subscription setup.
+//
+// clients.claim() makes the freshly activated SW take control of this page
+// immediately (without a reload) so pushManager.subscribe() sees an active SW.
+
+self.addEventListener("install", (event) => {
+  console.log("[SW] install — skipWaiting()");
+  event.waitUntil(self.skipWaiting());
+});
+
+self.addEventListener("activate", (event) => {
+  console.log("[SW] activate — clients.claim()");
+  event.waitUntil(self.clients.claim());
+});
+
+// ── Message: SKIP_WAITING (sent by Vite PWA autoUpdate injected code) ────────
+// Vite PWA's registerType:"autoUpdate" + injectManifest sends this message to
+// the waiting worker; handle it so the update lands without waiting for tabs.
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    console.log("[SW] SKIP_WAITING message received — skipWaiting()");
+    void self.skipWaiting();
+  }
+});
+
 // ── Push event handler ────────────────────────────────────────────────────────
 self.addEventListener("push", (event) => {
   if (!event.data) return;

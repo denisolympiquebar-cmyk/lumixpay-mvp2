@@ -1,0 +1,1 @@
+{"version":3,"file":"MockSettlementProvider.d.ts","sourceRoot":"","sources":["../../src/xrpl/MockSettlementProvider.ts"],"names":[],"mappings":"AACA,OAAO,EACL,kBAAkB,EAClB,iBAAiB,EACjB,gBAAgB,EACjB,MAAM,sBAAsB,CAAC;AAkB9B,qBAAa,sBAAuB,YAAW,kBAAkB;IAC/D;;;;OAIG;IACG,MAAM,CAAC,OAAO,EAAE,iBAAiB,GAAG,OAAO,CAAC,gBAAgB,CAAC;CAYpE;AAED,eAAO,MAAM,sBAAsB,wBAA+B,CAAC"}

@@ -327,16 +327,17 @@ curl -s ${BASE}/topup \\
               <h2 style={{ fontWeight: 800, fontSize: "1.35rem", letterSpacing: "-0.03em", marginBottom: 14 }}>Transfers</h2>
               <p style={{ color: "var(--muted)", fontSize: "0.9rem", lineHeight: 1.7, marginBottom: 20 }}>
                 Send stablecoins to another user. The sender pays a 1% fee on the gross amount;
-                the recipient receives the net amount. Supply <code style={{ color: "var(--accent-h)" }}>to_user_id</code> (UUID
-                from their profile) or{" "}
-                <code style={{ color: "var(--accent-h)" }}>to_username</code>.
-                Supports <code style={{ color: "var(--accent-h)" }}>Idempotency-Key</code>.
+                the recipient receives the net amount. Supply{" "}
+                <code style={{ color: "var(--accent-h)" }}>recipient</code> as either a
+                username (e.g. <code style={{ color: "var(--accent-h)" }}>alice_pay</code>) or
+                a user UUID. Lookup is case-insensitive for usernames.
+                Requires <code style={{ color: "var(--accent-h)" }}>Idempotency-Key</code>.
               </p>
 
               <Endpoint
                 method="POST" path="/transfers" auth
                 request={`{
-  "to_user_id":   "recipient-uuid",
+  "recipient":    "alice_pay",
   "asset_id":     "00000000-0000-0000-0000-000000000001",
   "gross_amount": 10
 }`}

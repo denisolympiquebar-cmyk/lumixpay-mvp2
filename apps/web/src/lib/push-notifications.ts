@@ -74,6 +74,9 @@ function vapidKeyToBytes(key: string): Uint8Array {
  * that is still "installing" or "waiting", which causes pushManager.subscribe()
  * to throw AbortError. navigator.serviceWorker.ready only resolves once a SW
  * has reached "activated" state — this is the correct gate for push.
+ *
+ * If there is already a waiting or installing SW we kick it with SKIP_WAITING
+ * so it activates immediately instead of blocking indefinitely.
  */
 async function getActiveSWRegistration(): Promise<ServiceWorkerRegistration> {
   if (!("serviceWorker" in navigator)) {
@@ -82,18 +85,59 @@ async function getActiveSWRegistration(): Promise<ServiceWorkerRegistration> {
 
   LOG("Waiting for navigator.serviceWorker.ready…");
 
+  // Probe current registration state and unblock a stuck worker before
+  // waiting on navigator.serviceWorker.ready.
+  try {
+    const current = await navigator.serviceWorker.getRegistration();
+    if (current) {
+      LOG(`SW registration found — installing: ${current.installing?.state ?? "none"} | waiting: ${current.waiting?.state ?? "none"} | active: ${current.active?.state ?? "none"}`);
+
+      if (current.installing) {
+        LOG("SW is still installing — navigator.serviceWorker.ready will resolve once installation completes.");
+      }
+
+      if (current.waiting) {
+        // A new SW finished installing but is blocked behind the old active one.
+        // Sending SKIP_WAITING triggers skipWaiting() inside the service worker,
+        // which allows it to activate immediately.
+        LOG("SW is in waiting state — sending SKIP_WAITING to unblock activation…");
+        current.waiting.postMessage({ type: "SKIP_WAITING" });
+        LOG("SKIP_WAITING sent.");
+      }
+
+      if (current.active) {
+        LOG(`SW active: state=${current.active.state}`);
+      }
+    } else {
+      WARN("No service worker registration found for this origin yet.");
+    }
+  } catch (probeErr) {
+    WARN("Could not probe SW registration state (non-fatal):", probeErr);
+  }
+
   const reg = await Promise.race([
     navigator.serviceWorker.ready,
     new Promise<never>((_, reject) =>
-      setTimeout(
-        () => reject(new Error("Service worker ready timed out after 10 s")),
-        10_000
-      )
+      setTimeout(async () => {
+        // Emit detailed state before rejecting so the error is diagnosable.
+        try {
+          const r = await navigator.serviceWorker.getRegistration();
+          ERR("SW ready timed out after 20 s. Registration state:", {
+            installing: r?.installing?.state ?? "none",
+            waiting:    r?.waiting?.state    ?? "none",
+            active:     r?.active?.state     ?? "none",
+            scope:      r?.scope             ?? "(no registration)",
+          });
+        } catch {
+          ERR("SW ready timed out after 20 s. Could not inspect registration state.");
+        }
+        reject(new Error("Service worker ready timed out after 20 s"));
+      }, 20_000)
     ),
   ]);
 
   const sw = reg.active;
-  LOG(`SW state: ${sw?.state ?? "none"} | scope: ${reg.scope}`);
+  LOG(`SW ready resolved — state: ${sw?.state ?? "none"} | scope: ${reg.scope}`);
   LOG(`SW controller: ${navigator.serviceWorker.controller ? "active" : "NOT controlling page (first load?)"}`);
 
   if (!sw || sw.state !== "activated") {

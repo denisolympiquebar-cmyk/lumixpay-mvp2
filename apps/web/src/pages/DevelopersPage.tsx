@@ -190,7 +190,7 @@ curl -s -X POST <span class="url">http://localhost:4000/transfers</span> \\
   -H <span class="str">"Authorization: Bearer \$TOKEN"</span> \\
   -H <span class="str">"Content-Type: application/json"</span> \\
   -d <span class="str">'{
-    "to_user_id": "<span class="key">recipient-uuid</span>",
+    "recipient":  "<span class="key">alice_pay</span>",
     "asset_id":   "<span class="key">00000000-0000-0000-0000-000000000001</span>",
     "gross_amount": <span class="num">50</span>
   }'</span>

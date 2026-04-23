@@ -6,9 +6,21 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
  * Generate a fresh idempotency key for a single user-initiated write action.
  * Call once per button click / form submit — pass the result as the
  * "Idempotency-Key" header to any endpoint that enforces requireIdempotencyKey.
+ *
+ * Uses crypto.randomUUID() where available (Chrome 92+, Firefox 95+, Safari 15.4+,
+ * all HTTPS contexts). Falls back to a Math.random-based UUID v4 for older browsers
+ * so this function never throws.
  */
 export function generateIdempotencyKey(): string {
-  return crypto.randomUUID();
+  try {
+    return crypto.randomUUID();
+  } catch {
+    // Fallback: RFC-4122 UUID v4 via Math.random (sufficient entropy for idempotency keys)
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+    });
+  }
 }
 
 /** Normalize any backend error payload to a human-readable string. */
