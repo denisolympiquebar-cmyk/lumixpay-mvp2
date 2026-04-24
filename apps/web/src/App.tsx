@@ -84,12 +84,20 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
       })
       .catch((e: any) => {
         if (cancelled) return;
-        // Invalid / expired token → clear session (only case we force logout).
-        console.warn("[auth] session restore failed:", e?.message ?? e);
-        localStorage.removeItem("lp_token");
-        localStorage.removeItem("lp_user");
-        setToken(null);
-        setUser(null);
+        // Only clear the session for actual auth failures (401/403 — invalid or expired token).
+        // Network errors, timeouts, and 5xx are transient; clearing the session would log
+        // the user out just because the phone was offline or the API was momentarily unreachable
+        // (a common cause of PWA launcher re-login loops).
+        const isAuthFailure = e?.status === 401 || e?.status === 403;
+        if (isAuthFailure) {
+          console.warn("[auth] session restore failed (auth error) — clearing session:", e?.message);
+          localStorage.removeItem("lp_token");
+          localStorage.removeItem("lp_user");
+          setToken(null);
+          setUser(null);
+        } else {
+          console.warn("[auth] session restore failed (non-auth error, keeping session):", e?.message ?? e);
+        }
         setReady(true);
       });
 

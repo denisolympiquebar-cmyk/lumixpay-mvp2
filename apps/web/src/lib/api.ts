@@ -63,7 +63,9 @@ export async function apiFetch<T>(
 
   if (!res.ok) {
     console.error(`[apiFetch] ${options.method ?? "GET"} ${url} → ${res.status}`, data);
-    throw new Error(extractMessage(data));
+    const err = new Error(extractMessage(data)) as Error & { status: number };
+    err.status = res.status;
+    throw err;
   }
 
   return data as T;

@@ -186,8 +186,28 @@ export async function getPushStatus(): Promise<PushUiStatus> {
  */
 export async function subscribeToPush(token: string): Promise<boolean> {
   LOG("=== subscribeToPush() start ===");
-  LOG(`Browser : ${detectBrowser()}`);
-  LOG(`User-Agent: ${navigator.userAgent}`);
+  LOG(`Browser    : ${detectBrowser()}`);
+  LOG(`User-Agent : ${navigator.userAgent}`);
+
+  const isIosPlatform = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const isStandalone  =
+    window.matchMedia("(display-mode: standalone)").matches ||
+    (window.navigator as any).standalone === true;
+
+  LOG(`Platform   : ${isIosPlatform ? "iOS" : "non-iOS"}`);
+  LOG(`Standalone : ${isStandalone}`);
+  LOG(`Permission : ${typeof Notification !== "undefined" ? Notification.permission : "N/A"}`);
+
+  // iOS Web Push only works when the app is installed to the home screen (standalone).
+  // In Safari browser mode the PushManager.subscribe() call hits APNs and always returns
+  // AbortError — bail early with a clear user-facing message instead of letting it fail.
+  if (isIosPlatform && !isStandalone) {
+    throw new Error(
+      'Push notifications on iPhone/iPad require the app to be installed. ' +
+      'Open this page in Safari, tap the Share icon, then tap "Add to Home Screen". ' +
+      'After launching from your home screen you can enable push from the Notifications page.'
+    );
+  }
 
   if (!("Notification"   in window))    throw new Error("Notifications not supported in this browser");
   if (!("serviceWorker"  in navigator)) throw new Error("Service workers not supported in this browser");
@@ -278,19 +298,32 @@ export async function subscribeToPush(token: string): Promise<boolean> {
         "enable 'Use Google services for push messaging'\n" +
         "  • Ensure VAPID_PUBLIC_KEY on the server matches the key used here (no key rotation mismatch)\n" +
         "  • Check that this origin is served over HTTPS\n" +
-        `  • VAPID key byte length was: ${applicationServerKey.length} (must be 65)`
+        `  • VAPID key byte length was: ${applicationServerKey.length} (must be 65)\n` +
+        `  • iOS: ${isIosPlatform} | standalone: ${isStandalone}`
       );
+      // Surface a human-readable message rather than the raw error.
+      // The iOS standalone case was already gated above, so this path means
+      // iOS standalone mode or a non-iOS browser where the push service
+      // (FCM/APNs) rejected registration — typically a network or server-key issue.
+      const userMsg = isIosPlatform
+        ? "Push subscription failed on iOS. Make sure you are running iOS 16.4+, using Safari, and that notifications are allowed in iOS Settings → Safari → [this site]."
+        : "The browser's push service rejected the subscription (AbortError). " +
+          "This can happen in Brave (enable Google push messaging), on a metered/VPN connection, or if the VAPID server key changed. " +
+          "Try again on a reliable connection or switch to Chrome/Firefox.";
+      throw new Error(userMsg);
     } else if (subErr?.name === "NotSupportedError") {
       ERR("NotSupportedError: PushManager is unavailable. Is the page served over HTTPS?");
+      throw new Error("Push is not supported in this browser (requires HTTPS). Try Chrome or Firefox over a secure connection.");
     } else if (subErr?.name === "InvalidStateError") {
       ERR("InvalidStateError: Service worker is registered but not controlling this page. Try a hard reload.");
+      throw new Error("Service worker is not ready to handle push. Close all tabs for this site, reopen, and try again.");
     } else if (subErr?.name === "NotAllowedError") {
       ERR("NotAllowedError: Browser denied the push subscription (may require secure context).");
+      throw new Error("Browser denied push access. Check that notifications are allowed in your browser or OS settings.");
     }
 
     throw new Error(
-      `Push subscription failed [${subErr?.name ?? "Error"}]: ${subErr?.message ?? "unknown reason"}. ` +
-      "Check the browser console for detailed diagnostics."
+      `Push subscription failed [${subErr?.name ?? "Error"}]: ${subErr?.message ?? "unknown reason"}.`
     );
   }
 
