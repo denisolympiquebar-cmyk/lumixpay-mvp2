@@ -275,53 +275,95 @@ export async function subscribeToPush(token: string): Promise<boolean> {
     WARN("Could not clear stale subscription (non-fatal, continuing):", clearErr);
   }
 
-  // ── Step 6: Subscribe ──────────────────────────────────────────────────────
+  // ── Step 6: Subscribe (with single AbortError retry) ──────────────────────
+  // AbortError from FCM/APNs can happen even after step-5 cleanup because the
+  // browser's push-service deregistration is async server-side; calling subscribe()
+  // immediately can hit a stale FCM state.  On first AbortError we do one more
+  // cleanup pass, wait 600 ms, then retry — no further retries.
   LOG("Step 6 — Calling pushManager.subscribe()…");
-  let subscription: PushSubscription;
+  const subOpts = { userVisibleOnly: true as const, applicationServerKey };
+
+  // null until successfully subscribed; subscribeErr captures the last failure.
+  let subscription: PushSubscription | null = null;
+  let subscribeErr: any = null;
+
   try {
-    subscription = await registration.pushManager.subscribe({
-      userVisibleOnly:    true,
-      applicationServerKey,
-    });
-    LOG("pushManager.subscribe() succeeded!");
+    subscription = await registration.pushManager.subscribe(subOpts);
+    LOG("pushManager.subscribe() succeeded (attempt 1)!");
     LOG(`Endpoint: ${subscription.endpoint.substring(0, 65)}…`);
-  } catch (subErr: any) {
-    ERR("pushManager.subscribe() FAILED");
-    ERR("  error.name    :", subErr?.name);
-    ERR("  error.message :", subErr?.message);
-    ERR("  full error    :", subErr);
+  } catch (firstErr: any) {
+    ERR("pushManager.subscribe() FAILED (attempt 1)");
+    ERR("  error.name    :", firstErr?.name);
+    ERR("  error.message :", firstErr?.message);
+
+    if (firstErr?.name === "AbortError") {
+      WARN("AbortError on attempt 1 — clearing residual push state, waiting 600 ms, then retrying once…");
+      try {
+        const residual = await registration.pushManager.getSubscription();
+        if (residual) {
+          LOG(`Residual subscription found — unsubscribing (${residual.endpoint.substring(0, 55)}…)…`);
+          await residual.unsubscribe();
+          LOG("Residual subscription cleared.");
+        } else {
+          LOG("No residual subscription found during retry cleanup.");
+        }
+      } catch (cleanErr) {
+        WARN("Could not clear residual subscription (non-fatal):", cleanErr);
+      }
+      await new Promise<void>((r) => setTimeout(r, 600));
+      try {
+        LOG("Retrying pushManager.subscribe()…");
+        subscription = await registration.pushManager.subscribe(subOpts);
+        LOG("Retry succeeded!");
+        LOG(`Endpoint: ${subscription.endpoint.substring(0, 65)}…`);
+      } catch (retryErr: any) {
+        ERR("pushManager.subscribe() FAILED (retry / attempt 2)");
+        ERR("  error.name    :", retryErr?.name);
+        ERR("  error.message :", retryErr?.message);
+        subscribeErr = retryErr;
+      }
+    } else {
+      subscribeErr = firstErr;
+    }
+  }
+
+  if (!subscription) {
+    const subErr = subscribeErr;
+    ERR("pushManager.subscribe() exhausted all attempts — giving up");
+    ERR(`  isIosPlatform : ${isIosPlatform} | isStandalone : ${isStandalone}`);
+    ERR(`  VAPID key byte length : ${applicationServerKey.length} (must be 65)`);
+    ERR("  full error:", subErr);
 
     if (subErr?.name === "AbortError") {
       ERR(
-        "AbortError diagnosis: The browser push service (FCM/APNs) rejected the subscription.\n" +
-        "  • If using Brave: go to brave://settings/privacy → disable 'Block fingerprinting' or " +
-        "enable 'Use Google services for push messaging'\n" +
-        "  • Ensure VAPID_PUBLIC_KEY on the server matches the key used here (no key rotation mismatch)\n" +
-        "  • Check that this origin is served over HTTPS\n" +
-        `  • VAPID key byte length was: ${applicationServerKey.length} (must be 65)\n` +
+        "AbortError diagnosis: browser push service (FCM/APNs) rejected registration.\n" +
+        "  • Chrome/Android: ensure Google Play Services is current; try on a different network.\n" +
+        "  • Brave: brave://settings/privacy → enable 'Use Google services for push messaging'.\n" +
+        "  • VAPID key rotation invalidates all existing subscriptions — re-subscribe after rotation.\n" +
+        `  • VAPID key byte length: ${applicationServerKey.length} (must be 65)\n` +
         `  • iOS: ${isIosPlatform} | standalone: ${isStandalone}`
       );
-      // Surface a human-readable message rather than the raw error.
-      // The iOS standalone case was already gated above, so this path means
-      // iOS standalone mode or a non-iOS browser where the push service
-      // (FCM/APNs) rejected registration — typically a network or server-key issue.
       const userMsg = isIosPlatform
-        ? "Push subscription failed on iOS. Make sure you are running iOS 16.4+, using Safari, and that notifications are allowed in iOS Settings → Safari → [this site]."
-        : "The browser's push service rejected the subscription (AbortError). " +
-          "This can happen in Brave (enable Google push messaging), on a metered/VPN connection, or if the VAPID server key changed. " +
-          "Try again on a reliable connection or switch to Chrome/Firefox.";
+        ? "Push subscription failed on iOS. Ensure you are running iOS 16.4+, using Safari, and that notifications are allowed in iOS Settings → Safari → [this site]."
+        : "The browser's push service rejected the subscription. " +
+          "In Brave, enable 'Use Google services for push messaging' in brave://settings/privacy. " +
+          "On Android, ensure Google Play Services is up to date. " +
+          "Try again on a stable connection.";
       throw new Error(userMsg);
-    } else if (subErr?.name === "NotSupportedError") {
-      ERR("NotSupportedError: PushManager is unavailable. Is the page served over HTTPS?");
-      throw new Error("Push is not supported in this browser (requires HTTPS). Try Chrome or Firefox over a secure connection.");
-    } else if (subErr?.name === "InvalidStateError") {
-      ERR("InvalidStateError: Service worker is registered but not controlling this page. Try a hard reload.");
-      throw new Error("Service worker is not ready to handle push. Close all tabs for this site, reopen, and try again.");
-    } else if (subErr?.name === "NotAllowedError") {
-      ERR("NotAllowedError: Browser denied the push subscription (may require secure context).");
-      throw new Error("Browser denied push access. Check that notifications are allowed in your browser or OS settings.");
     }
 
+    if (subErr?.name === "NotSupportedError") {
+      ERR("NotSupportedError: PushManager unavailable — is the page served over HTTPS?");
+      throw new Error("Push is not supported here (requires HTTPS). Try Chrome or Firefox on a secure connection.");
+    }
+    if (subErr?.name === "InvalidStateError") {
+      ERR("InvalidStateError: SW registered but not controlling the page — try a hard reload.");
+      throw new Error("Service worker not ready. Close all tabs for this site, reopen, and try again.");
+    }
+    if (subErr?.name === "NotAllowedError") {
+      ERR("NotAllowedError: browser denied push subscription.");
+      throw new Error("Browser denied push access. Check that notifications are allowed in your browser and OS settings.");
+    }
     throw new Error(
       `Push subscription failed [${subErr?.name ?? "Error"}]: ${subErr?.message ?? "unknown reason"}.`
     );
