@@ -2,7 +2,9 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import { config } from "./config";
+import { assertProductionSecrets, config } from "./config";
+
+assertProductionSecrets();
 
 import authRouter          from "./routes/auth";
 import accountsRouter      from "./routes/accounts";
@@ -30,6 +32,7 @@ import streamRouter           from "./routes/stream";
 
 import { seedAdminIfEnabled } from "./services/AdminSeedService";
 import { startRecurringJob }  from "./services/RecurringService";
+import { xrplSettlementQueueService } from "./services/XrplSettlementQueueService";
 import { authLimiter, mutationLimiter, devLimiter } from "./middleware/rate-limit";
 import { usageLogger } from "./middleware/usage-logger";
 import { correlationId } from "./middleware/correlation";
@@ -217,6 +220,7 @@ async function start(): Promise<void> {
   });
 
   startRecurringJob();
+  xrplSettlementQueueService.start();
 }
 
 void start();

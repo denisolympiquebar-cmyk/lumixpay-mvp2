@@ -15,6 +15,7 @@ export type NotificationType =
   | "withdrawal.approved"
   | "withdrawal.rejected"
   | "withdrawal.settled"
+  | "xrpl_wallet.received"
   | "voucher.redeemed"
   | "voucher.purchased"
   | "payment_link.paid"

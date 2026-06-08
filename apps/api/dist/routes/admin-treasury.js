@@ -5,6 +5,8 @@ const zod_1 = require("zod");
 const auth_1 = require("../middleware/auth");
 const pool_1 = require("../db/pool");
 const AuditLogService_1 = require("../services/AuditLogService");
+const XrplTreasuryService_1 = require("../services/XrplTreasuryService");
+const XrplSettlementQueueService_1 = require("../services/XrplSettlementQueueService");
 const router = (0, express_1.Router)();
 // ── GET /admin/treasury/revenue?period=today|7d|30d|all ──────────────────────
 const PERIOD_SQL = {
@@ -124,6 +126,91 @@ router.put("/:asset_id", auth_1.authenticate, (0, auth_1.requireRole)("admin"), 
     catch (err) {
         console.error("PUT /admin/treasury/:asset_id error:", err);
         return res.status(500).json({ error: "Internal server error" });
+    }
+});
+// ── GET /admin/treasury/xrpl-testnet/queue ───────────────────────────────────
+//
+// Returns the real-time settlement queue status:
+//   - Worker running state
+//   - Number of pending withdrawals awaiting settlement (DB count)
+//   - Number currently in flight within this process
+//   - Last / next run timestamps
+router.get("/xrpl-testnet/queue", auth_1.authenticate, (0, auth_1.requireRole)("admin"), async (_req, res) => {
+    try {
+        const [status, queued] = await Promise.all([
+            Promise.resolve(XrplSettlementQueueService_1.xrplSettlementQueueService.getStatus()),
+            XrplSettlementQueueService_1.xrplSettlementQueueService.getQueuedCount(),
+        ]);
+        return res.json({
+            ok: true,
+            workerEnabled: status.workerEnabled,
+            queued,
+            processing: status.processing,
+            lastRunAt: status.lastRunAt,
+            nextRunAt: status.nextRunAt,
+        });
+    }
+    catch (err) {
+        console.error("GET /admin/treasury/xrpl-testnet/queue error:", err);
+        return res.status(500).json({ ok: false, error: "Internal server error" });
+    }
+});
+// ── POST /admin/treasury/xrpl-testnet/queue/run ──────────────────────────────
+//
+// Triggers one immediate settlement queue cycle outside the 30 s interval.
+// Useful for testing or when the admin wants to process approvals right away.
+//
+// The cycle runs asynchronously — the response returns immediately.
+// If a cycle is already running, the response indicates that.
+router.post("/xrpl-testnet/queue/run", auth_1.authenticate, (0, auth_1.requireRole)("admin"), async (req, res) => {
+    void AuditLogService_1.auditLogService.log({
+        actorUserId: req.user?.sub ?? null,
+        actionType: "admin.queue.manual_trigger",
+        entityType: "system",
+        entityId: "xrpl_settlement_queue",
+        correlationId: req.correlationId ?? null,
+        metadata: { triggeredBy: req.user?.sub ?? "unknown" },
+    });
+    // Fire the cycle asynchronously — don't await (it can take up to 30s+)
+    void XrplSettlementQueueService_1.xrplSettlementQueueService.runCycle();
+    const queuedCount = await XrplSettlementQueueService_1.xrplSettlementQueueService.getQueuedCount();
+    return res.json({
+        ok: true,
+        message: `Queue cycle triggered. ${queuedCount} withdrawal(s) pending.`,
+        queued: queuedCount,
+    });
+});
+// ── GET /admin/treasury/xrpl-testnet ─────────────────────────────────────────
+//
+// Returns the XRPL Testnet treasury dashboard:
+//   - Treasury/issuer wallet on-chain state (XRP balance, outstanding obligations)
+//   - Settlement statistics from withdrawal_requests (aggregated by asset)
+//   - Last 20 xrpl_testnet settlement records
+//
+// READ-ONLY: no seed access, no signing, no DB writes.
+router.get("/xrpl-testnet", auth_1.authenticate, (0, auth_1.requireRole)("admin"), async (req, res) => {
+    try {
+        const result = await XrplTreasuryService_1.xrplTreasuryService.getDashboard();
+        if (result.status === "config_missing") {
+            return res.status(503).json({ ok: false, status: "config_missing", message: result.message });
+        }
+        if (result.status === "xrpl_testnet_unavailable") {
+            return res.status(503).json({ ok: false, status: "xrpl_testnet_unavailable", message: result.message });
+        }
+        return res.json({
+            ok: true,
+            network: result.network,
+            treasury: result.treasury,
+            health: result.health,
+            metrics: result.metrics,
+            queueMetrics: result.queueMetrics,
+            settlementStats: result.settlementStats,
+            recentSettlements: result.recentSettlements,
+        });
+    }
+    catch (err) {
+        console.error("GET /admin/treasury/xrpl-testnet error:", err);
+        return res.status(500).json({ ok: false, error: "Internal server error" });
     }
 });
 exports.default = router;

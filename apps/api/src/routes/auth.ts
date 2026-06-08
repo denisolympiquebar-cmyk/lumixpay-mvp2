@@ -8,6 +8,7 @@ import { OAuth2Client } from "google-auth-library";
 import { pool } from "../db/pool";
 import { config } from "../config";
 import { User } from "../db/types";
+import { custodialWalletService } from "../services/CustodialWalletService";
 
 const router = Router();
 
@@ -76,7 +77,28 @@ router.post("/register", async (req, res) => {
       );
     }
 
+    // Provision custodial XRPL Testnet wallet inside the same transaction.
+    // On failure the entire registration rolls back (atomic: user + wallet or nothing).
+    // In development with WALLET_MASTER_KEY unset this returns null (skipped gracefully).
+    const provisionedWallet = await custodialWalletService.provision(userId, client);
+
     await client.query("COMMIT");
+
+    // Fire-and-forget: request testnet XRP from faucet after the DB commit.
+    // Faucet failure must NOT affect registration response.
+    if (provisionedWallet) {
+      void custodialWalletService.requestTestnetFunding(userId)
+        .then((r) => {
+          if (r.status === "funded") {
+            console.log(`[Auth] Testnet wallet funded for user ${userId} (${provisionedWallet.classic_address})`);
+          } else if (r.status !== "already_funded") {
+            console.warn(`[Auth] Faucet result for user ${userId}: ${r.status}`);
+          }
+        })
+        .catch((err: unknown) => {
+          console.error(`[Auth] Faucet fire-and-forget error for user ${userId}:`, (err as Error).message);
+        });
+    }
 
     const token = jwt.sign(
       { sub: user.id, email: user.email, role: user.role },
@@ -180,6 +202,7 @@ router.post("/google", async (req, res) => {
     );
 
     let userId: string | null = idRows[0]?.user_id ?? null;
+    let googleNewUserProvisionedAddress: string | null = null;
 
     // 2) Else link to existing user by verified email (prevents duplicate accounts).
     if (!userId) {
@@ -220,6 +243,14 @@ router.post("/google", async (req, res) => {
           [accountId]
         );
       }
+
+      // Provision custodial XRPL Testnet wallet for new Google users.
+      // Must be inside the transaction so wallet creation rolls back with the user row on failure.
+      // In development with WALLET_MASTER_KEY unset this returns null (skipped gracefully).
+      const googleWallet = await custodialWalletService.provision(userId, client);
+      if (googleWallet) {
+        googleNewUserProvisionedAddress = googleWallet.classic_address;
+      }
     }
 
     // 4) Upsert identity link
@@ -239,6 +270,22 @@ router.post("/google", async (req, res) => {
     if (!user) throw new Error("User not found after Google auth");
 
     await client.query("COMMIT");
+
+    // Fire-and-forget testnet funding for newly provisioned Google OAuth wallets.
+    if (googleNewUserProvisionedAddress && userId) {
+      const fundUserId = userId; // capture for closure
+      void custodialWalletService.requestTestnetFunding(fundUserId)
+        .then((r) => {
+          if (r.status === "funded") {
+            console.log(`[Auth/Google] Testnet wallet funded for user ${fundUserId} (${googleNewUserProvisionedAddress})`);
+          } else if (r.status !== "already_funded") {
+            console.warn(`[Auth/Google] Faucet result for user ${fundUserId}: ${r.status}`);
+          }
+        })
+        .catch((err: unknown) => {
+          console.error(`[Auth/Google] Faucet fire-and-forget error for user ${fundUserId}:`, (err as Error).message);
+        });
+    }
 
     const token = jwt.sign(
       { sub: user.id, email: user.email, role: user.role },

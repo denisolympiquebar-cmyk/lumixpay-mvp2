@@ -105,6 +105,29 @@ export declare class LedgerService {
      *    and reduce user.locked -= net after TX is confirmed on-chain.
      */
     reviewWithdrawal(params: ReviewWithdrawalParams): Promise<WithdrawalRequest>;
+    /**
+     * Admin cancels an **approved** withdrawal that has not yet been settled on-chain.
+     *
+     * ── When safe to call ───────────────────────────────────────────────────────
+     *   - status = 'approved'
+     *   - xrpl_confirmed_at IS NULL   (no on-chain TX confirmed)
+     *   - xrpl_tx_hash IS NULL        (no TX was broadcast)
+     *
+     * ── Ledger movements ────────────────────────────────────────────────────────
+     *   withdrawal_escrow → user_account  (net)  [type=withdrawal_unlock]
+     *   balance: user.locked -= net; user.available += net
+     *
+     *   The withdrawal fee is NOT refunded (same policy as reject from pending).
+     *
+     * ── Safety ──────────────────────────────────────────────────────────────────
+     *   Uses withTransaction + SELECT FOR UPDATE — safe against concurrent settle.
+     *   xrpl_submitted_at and settlement_provider are cleared so the queue ignores it.
+     */
+    cancelApprovedWithdrawal(params: {
+        withdrawalId: string;
+        adminId: string;
+        reason?: string;
+    }): Promise<WithdrawalRequest>;
     getBalance(accountId: string): Promise<{
         available: string;
         locked: string;

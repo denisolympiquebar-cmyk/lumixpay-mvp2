@@ -477,6 +477,104 @@ class LedgerService {
         })();
         return result;
     }
+    // ── Public: cancelApprovedWithdrawal ─────────────────────────────────────────
+    /**
+     * Admin cancels an **approved** withdrawal that has not yet been settled on-chain.
+     *
+     * ── When safe to call ───────────────────────────────────────────────────────
+     *   - status = 'approved'
+     *   - xrpl_confirmed_at IS NULL   (no on-chain TX confirmed)
+     *   - xrpl_tx_hash IS NULL        (no TX was broadcast)
+     *
+     * ── Ledger movements ────────────────────────────────────────────────────────
+     *   withdrawal_escrow → user_account  (net)  [type=withdrawal_unlock]
+     *   balance: user.locked -= net; user.available += net
+     *
+     *   The withdrawal fee is NOT refunded (same policy as reject from pending).
+     *
+     * ── Safety ──────────────────────────────────────────────────────────────────
+     *   Uses withTransaction + SELECT FOR UPDATE — safe against concurrent settle.
+     *   xrpl_submitted_at and settlement_provider are cleared so the queue ignores it.
+     */
+    async cancelApprovedWithdrawal(params) {
+        const { withdrawalId, adminId, reason } = params;
+        const result = await (0, pool_1.withTransaction)(async (client) => {
+            const { rows } = await client.query("SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE", [withdrawalId]);
+            const wr = rows[0];
+            if (!wr) {
+                throw Object.assign(new Error(`Withdrawal request ${withdrawalId} not found`), { status: 404 });
+            }
+            if (wr.status !== "approved") {
+                throw Object.assign(new Error(`Cannot cancel withdrawal in status '${wr.status}'. ` +
+                    `Only 'approved' withdrawals without an on-chain confirmation can be cancelled.`), { status: 409, code: "INVALID_STATUS_FOR_CANCEL" });
+            }
+            if (wr.xrpl_confirmed_at !== null || wr.xrpl_tx_hash !== null) {
+                throw Object.assign(new Error("Cannot cancel an already-confirmed withdrawal " +
+                    "(xrpl_confirmed_at or xrpl_tx_hash is set). " +
+                    "Contact the XRPL issuer to reverse the on-chain payment if needed."), { status: 409, code: "WITHDRAWAL_ALREADY_CONFIRMED" });
+            }
+            if (wr.xrpl_submitted_at !== null) {
+                throw Object.assign(new Error("Settlement is already in progress for this withdrawal. " +
+                    "Wait for it to complete or fail before cancelling."), { status: 409, code: "SETTLEMENT_IN_FLIGHT" });
+            }
+            // Stamp as rejected; clear settlement in-flight fields
+            const { rows: updated } = await client.query(`UPDATE withdrawal_requests
+            SET status              = 'rejected',
+                admin_note          = $1,
+                reviewed_by         = $2,
+                reviewed_at         = NOW(),
+                xrpl_submitted_at   = NULL,
+                settlement_provider = NULL,
+                updated_at          = NOW()
+          WHERE id = $3
+          RETURNING *`, [reason ?? "Cancelled by admin", adminId, withdrawalId]);
+            const net = new decimal_js_1.default(wr.net_amount);
+            const sys = this.systemAccounts(wr.asset_id);
+            // Unwind escrow: withdrawal_escrow → user_account (net).
+            // Fee stays with fee_collector — same policy as reject-from-pending.
+            await this.postEntry(client, {
+                idempotencyKey: `withdrawal_cancel_approved:${withdrawalId}`,
+                debitAccountId: sys.withdrawalEscrow,
+                creditAccountId: wr.account_id,
+                assetId: wr.asset_id,
+                amount: net,
+                entryType: "withdrawal_unlock",
+                referenceId: withdrawalId,
+                referenceType: "withdrawal_requests",
+                metadata: { reason: reason ?? "Cancelled by admin", cancelledBy: adminId },
+            });
+            // Mirror in read model: locked → available
+            await client.query(`UPDATE balances
+            SET locked     = locked    - $1,
+                available  = available + $1,
+                updated_at = NOW()
+          WHERE account_id = $2`, [net.toFixed(6), wr.account_id]);
+            return updated[0];
+        });
+        // Fire-and-forget notification to the user
+        void (async () => {
+            try {
+                const currency = this.getCurrencyCode(result.asset_id);
+                await NotificationService_1.notificationService.create({
+                    userId: result.user_id,
+                    type: "withdrawal.rejected",
+                    title: "Withdrawal cancelled",
+                    body: `Your withdrawal of ${result.net_amount} ${currency}_TEST was cancelled by an admin. ` +
+                        `Funds have been returned to your available balance.`,
+                    metadata: {
+                        withdrawal_id: result.id,
+                        amount: result.net_amount,
+                        currency,
+                        reason: reason ?? null,
+                    },
+                });
+            }
+            catch (e) {
+                console.error("notification error (withdrawal.cancel_approved):", e);
+            }
+        })();
+        return result;
+    }
     // ── Public: getBalance ───────────────────────────────────────────────────────
     async getBalance(accountId) {
         const { rows } = await pool_1.pool.query("SELECT available, locked FROM balances WHERE account_id = $1", [accountId]);
@@ -614,7 +712,30 @@ class LedgerService {
             assetCode: currency,
             assetIssuerAddress: issuerAddress,
         });
-        // ── 5. Persist the result inside a serialised DB transaction ─────────────
+        // ── 5a. Provider failed / timed out — reset and throw (outside any TX) ─────
+        //
+        // CRITICAL: this reset MUST run as a plain auto-commit query, not inside
+        // withTransaction. withTransaction issues ROLLBACK on any thrown error, which
+        // would undo the reset and leave xrpl_submitted_at set — causing every retry
+        // to hit SETTLEMENT_IN_FLIGHT.
+        //
+        // Running it here (outside withTransaction) guarantees the row is immediately
+        // retryable even if the process crashes after this point.
+        if (settlementResult.status !== "confirmed") {
+            await pool_1.pool.query(`UPDATE withdrawal_requests
+            SET xrpl_submitted_at   = NULL,
+                settlement_provider = NULL,
+                updated_at          = NOW()
+          WHERE id = $1`, [withdrawalId]);
+            throw Object.assign(new Error(`Settlement provider returned status '${settlementResult.status}' ` +
+                `(txHash: ${settlementResult.txHash}). xrpl_submitted_at has been reset — safe to retry.`), {
+                status: 502,
+                code: "SETTLEMENT_PROVIDER_FAILED",
+                txHash: settlementResult.txHash,
+                friendlyError: settlementResult.friendlyError,
+            });
+        }
+        // ── 5b. Persist confirmed result inside a serialised DB transaction ───────
         const settled = await (0, pool_1.withTransaction)(async (client) => {
             // Re-fetch with row lock to prevent concurrent settlement writes
             const { rows: locked } = await client.query("SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE", [withdrawalId]);
@@ -623,16 +744,10 @@ class LedgerService {
             if (wr.status === "settled") {
                 return wr;
             }
-            if (settlementResult.status !== "confirmed") {
-                // Provider failed or timed out — reset xrpl_submitted_at so the admin
-                // can safely retry after investigating the failure.
-                await client.query(`UPDATE withdrawal_requests
-              SET xrpl_submitted_at   = NULL,
-                  settlement_provider = NULL,
-                  updated_at          = NOW()
-            WHERE id = $1`, [withdrawalId]);
-                throw Object.assign(new Error(`Settlement provider returned status '${settlementResult.status}' ` +
-                    `(txHash: ${settlementResult.txHash}). xrpl_submitted_at has been reset — safe to retry.`), { status: 502, code: "SETTLEMENT_PROVIDER_FAILED", txHash: settlementResult.txHash });
+            // Withdrawal was cancelled/rejected while provider was settling — do not post ledger
+            if (wr.status !== "approved") {
+                throw Object.assign(new Error(`Cannot complete settlement: withdrawal is in status '${wr.status}'. ` +
+                    `It may have been cancelled during on-chain processing.`), { status: 409, code: "WITHDRAWAL_NO_LONGER_APPROVED" });
             }
             // ── Ledger entry: withdrawal_escrow → FLOAT [withdrawal_settle] ──────
             // ── ACCOUNTING NOTE ──────────────────────────────────────────────────
@@ -680,13 +795,14 @@ class LedgerService {
             return settledRows[0];
         });
         // ── 6. Post-commit: notifications + SSE (fire-and-forget) ─────────────────
+        // 6a. Notify the withdrawing user
         void NotificationService_1.notificationService
             .create({
             userId: pre.user_id,
             type: "withdrawal.settled",
             title: "Withdrawal settled",
-            body: `Your withdrawal of ${pre.net_amount} ${currency} has been sent to ` +
-                `${pre.xrpl_destination_address}. TX: ${settled.xrpl_tx_hash}`,
+            body: `Your withdrawal of ${pre.net_amount} ${currency}_TEST has been sent to ` +
+                `${pre.xrpl_destination_address} on XRPL Testnet. TX: ${settled.xrpl_tx_hash}`,
             metadata: {
                 withdrawal_id: withdrawalId,
                 xrpl_tx_hash: settled.xrpl_tx_hash,
@@ -694,6 +810,41 @@ class LedgerService {
             },
         })
             .catch((e) => console.error("notification error (withdrawal.settle):", e));
+        // 6b. Check whether the XRPL destination belongs to another LumixPay custodial wallet.
+        //     If so, notify that user that their XRPL wallet received funds on-chain.
+        //     This does NOT credit any internal balance — it is purely an informational notification.
+        void (async () => {
+            try {
+                const { rows: walletRows } = await pool_1.pool.query(`SELECT user_id
+             FROM user_wallets
+            WHERE classic_address = $1
+              AND network         = 'xrpl_testnet'
+              AND is_active       = true
+            LIMIT 1`, [pre.xrpl_destination_address]);
+                const recipientUserId = walletRows[0]?.user_id;
+                // Only notify if the destination belongs to a *different* LumixPay user
+                if (recipientUserId && recipientUserId !== pre.user_id) {
+                    const assetCode = currency; // e.g. "RLUSD" or "EURQ"
+                    await NotificationService_1.notificationService.create({
+                        userId: recipientUserId,
+                        type: "xrpl_wallet.received",
+                        title: "XRPL wallet received funds",
+                        body: `You received ${pre.net_amount} ${assetCode}_TEST on your XRPL Testnet wallet.`,
+                        metadata: {
+                            type: "xrpl_wallet_received",
+                            withdrawalId,
+                            txHash: settled.xrpl_tx_hash,
+                            assetCode,
+                            amount: pre.net_amount,
+                            network: "xrpl_testnet",
+                        },
+                    });
+                }
+            }
+            catch (e) {
+                console.error("notification error (xrpl_wallet.received):", e);
+            }
+        })();
         void this.publishBalancesAndActivity(pre.user_id, pre.account_id, null);
         void StreamService_1.streamService.publishAdmin("admin.withdrawals.updated", { withdrawalId, status: "settled" });
         return settled;

@@ -8,6 +8,7 @@ const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
 const config_1 = require("./config");
+(0, config_1.assertProductionSecrets)();
 const auth_1 = __importDefault(require("./routes/auth"));
 const accounts_1 = __importDefault(require("./routes/accounts"));
 const topup_1 = __importDefault(require("./routes/topup"));
@@ -33,6 +34,7 @@ const push_1 = __importDefault(require("./routes/push"));
 const stream_1 = __importDefault(require("./routes/stream"));
 const AdminSeedService_1 = require("./services/AdminSeedService");
 const RecurringService_1 = require("./services/RecurringService");
+const XrplSettlementQueueService_1 = require("./services/XrplSettlementQueueService");
 const rate_limit_1 = require("./middleware/rate-limit");
 const usage_logger_1 = require("./middleware/usage-logger");
 const correlation_1 = require("./middleware/correlation");
@@ -192,6 +194,7 @@ async function start() {
         console.log(`Environment: ${config_1.config.nodeEnv}`);
     });
     (0, RecurringService_1.startRecurringJob)();
+    XrplSettlementQueueService_1.xrplSettlementQueueService.start();
 }
 void start();
 exports.default = app;

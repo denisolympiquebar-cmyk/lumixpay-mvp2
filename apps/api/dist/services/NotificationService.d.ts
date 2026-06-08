@@ -1,4 +1,4 @@
-export type NotificationType = "topup.completed" | "transfer.sent" | "transfer.received" | "withdrawal.requested" | "withdrawal.approved" | "withdrawal.rejected" | "withdrawal.settled" | "voucher.redeemed" | "voucher.purchased" | "payment_link.paid" | "recurring.executed" | "fx.converted";
+export type NotificationType = "topup.completed" | "transfer.sent" | "transfer.received" | "withdrawal.requested" | "withdrawal.approved" | "withdrawal.rejected" | "withdrawal.settled" | "xrpl_wallet.received" | "voucher.redeemed" | "voucher.purchased" | "payment_link.paid" | "recurring.executed" | "fx.converted";
 export interface Notification {
     id: string;
     user_id: string;

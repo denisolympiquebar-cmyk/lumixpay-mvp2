@@ -302,6 +302,35 @@ function calcFee(gross: number): { fee: string; net: string } {
   return { fee: fee.toFixed(2), net: (gross - fee).toFixed(2) };
 }
 
+/** Truncate a long TX hash for display, e.g. 7680B9FF…673626 */
+function truncateTxHash(hash: string, head = 8, tail = 6): string {
+  if (hash.length <= head + tail + 1) return hash;
+  return `${hash.slice(0, head)}…${hash.slice(-tail)}`;
+}
+
+/** Extract an XRPL TX hash from notification metadata if present. */
+function getNotificationTxHash(metadata: Record<string, unknown> | null | undefined): string | null {
+  if (!metadata) return null;
+  const h = metadata["txHash"] ?? metadata["xrpl_tx_hash"];
+  return typeof h === "string" && h.length > 0 && !h.startsWith("mock_") ? h : null;
+}
+
+/** Format notification body: wrap-safe text with truncated inline hashes; strip full TX suffix when explorer link is shown. */
+function formatNotificationBody(
+  body: string | null | undefined,
+  metadata: Record<string, unknown> | null | undefined
+): string {
+  if (!body) return "";
+  const txHash = getNotificationTxHash(metadata);
+  let text = body;
+  if (txHash) {
+    text = text.replace(new RegExp(`\\s*TX:\\s*${txHash}`, "i"), "");
+    text = text.replace(/\s*TX:\s*[A-Fa-f0-9]{16,}/i, "");
+  }
+  text = text.replace(/\b([A-Fa-f0-9]{20,})\b/g, (m) => truncateTxHash(m));
+  return text.trim();
+}
+
 function CopyButton({ text, label, style }: { text: string; label?: string; style?: React.CSSProperties }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
@@ -394,6 +423,14 @@ const ERROR_FRIENDLY: Record<string, string> = {
   UNAUTHORIZED:            "Your session has expired. Please log in again.",
   SETTLEMENT_IN_FLIGHT:    "Settlement is already in progress for this withdrawal.",
   ALREADY_SETTLED:         "This withdrawal has already been settled.",
+  DESTINATION_NOT_FOUND:   "Recipient username not found or does not have an active XRPL Testnet wallet. Ask them to complete wallet setup on Profile.",
+  SELF_WITHDRAWAL_USERNAME:"You cannot withdraw to your own LumixPay XRPL wallet by username. Use your Profile wallet or enter a different recipient.",
+  DESTINATION_MISMATCH:    "The username and XRPL address do not match the same wallet. Use one destination type only.",
+  INVALID_XRPL_ADDRESS:    "Enter a valid XRPL Testnet address (starts with r) or a LumixPay username.",
+  WITHDRAWAL_NO_LONGER_APPROVED: "This withdrawal was cancelled while settlement was processing. Refresh and check its current status.",
+  INVALID_STATUS_FOR_CANCEL:     "Only approved withdrawals that have not started on-chain settlement can be cancelled.",
+  INVALID_STATUS_FOR_SETTLEMENT: "Only approved withdrawals can be settled. Check the current status before retrying.",
+  SETTLEMENT_PROVIDER_FAILED:    "XRPL Testnet settlement did not complete. Review the destination wallet and retry.",
   XRPL_ADDRESS_INVALID:         "That XRPL address does not look valid. Use a classic Testnet address (starts with r).",
   WALLET_CHALLENGE_INVALID:     "This verification message is invalid. Request a new one and try again.",
   WALLET_CHALLENGE_EXPIRED:     "The verification message expired. Request a new one.",
@@ -726,25 +763,94 @@ function DashboardPage() {
 
       {/* Balance cards */}
       {!loading && (
-        <div className="dash-grid">
-          {accounts.map((acc) => (
-            <div key={acc.id} className="widget balance-card">
-              <div className="balance-currency">
-                {acc.asset.display_name}
-                <span className="settle-tag">internal</span>
+        <>
+          <div className="dash-grid">
+            {accounts.map((acc) => (
+              <div key={acc.id} className="widget balance-card">
+                <div className="balance-currency">
+                  {acc.asset.display_name}
+                  <span className="settle-tag">Internal</span>
+                </div>
+                <div style={{ fontSize: "2rem", fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text)", margin: "6px 0 4px" }}>
+                  {formatMoney(acc.balance.available)}
+                  <span style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--muted)", marginLeft: 8 }}>{acc.asset.display_symbol}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: "0.73rem", color: "var(--muted)" }}>Internal LumixPay balance</span>
+                  {parseFloat(String(acc.balance.locked)) > 0 && (
+                    <span className="locked-amount">🔒 {formatMoney(acc.balance.locked)} locked</span>
+                  )}
+                </div>
               </div>
-              <div style={{ fontSize: "2rem", fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text)", margin: "6px 0 4px" }}>
-                {formatMoney(acc.balance.available)}
-                <span style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--muted)", marginLeft: 8 }}>{acc.asset.display_symbol}</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: "0.73rem", color: "var(--muted)" }}>Available balance</span>
-                {parseFloat(String(acc.balance.locked)) > 0 && (
-                  <span className="locked-amount">🔒 {formatMoney(acc.balance.locked)} locked</span>
-                )}
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
+          <p className="muted" style={{ fontSize: "0.73rem", marginBottom: 16, marginTop: -10 }}>
+            Internal LumixPay balances (Testnet demo) — separate from your XRPL Testnet wallet.{" "}
+            Use <Link to="/withdraw" style={{ color: "var(--accent)", textDecoration: "none" }}>Withdraw</Link> to move internal balance to an XRPL Testnet wallet.{" "}
+            <Link to="/profile" style={{ color: "var(--accent)", textDecoration: "none" }}>View XRPL wallet →</Link>
+          </p>
+        </>
+      )}
+
+      {/* Quick Start guide — shown only when user has no activity yet */}
+      {!loading && activity.length === 0 && (
+        <div
+          className="widget"
+          style={{
+            marginBottom: 20,
+            background: "linear-gradient(135deg, rgba(99,102,241,0.07) 0%, rgba(16,185,129,0.05) 100%)",
+            border: "1px solid rgba(99,102,241,0.18)",
+          }}
+        >
+          <div className="widget-title" style={{ marginBottom: 12 }}>🚀 Quick Start — LumixPay Demo</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+            {([
+              { step: 1, label: "Fund your account (voucher or top-up)", link: "/vouchers", icon: "🎟" },
+              { step: 2, label: "Send funds to another user",     link: "/transfer",  icon: "↗" },
+              { step: 3, label: "Withdraw to your XRPL wallet",  link: "/withdraw",  icon: "↙" },
+              { step: 4, label: "View settlement history",        link: "/history",   icon: "📋" },
+            ] as const).map(({ step, label, link, icon }) => (
+              <Link
+                key={step}
+                to={link}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 14,
+                  padding: "10px 4px",
+                  borderBottom: step < 4 ? "1px solid var(--border)" : "none",
+                  textDecoration: "none",
+                  color: "var(--text)",
+                }}
+              >
+                <span
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: "50%",
+                    background: "rgba(99,102,241,0.15)",
+                    color: "var(--accent)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontWeight: 700,
+                    fontSize: "0.78rem",
+                    flexShrink: 0,
+                  }}
+                >
+                  {step}
+                </span>
+                <span style={{ fontSize: "0.9rem" }}>
+                  <span style={{ marginRight: 6 }}>{icon}</span>
+                  {label}
+                </span>
+                <span className="muted" style={{ marginLeft: "auto", fontSize: "0.8rem" }}>→</span>
+              </Link>
+            ))}
+          </div>
+          <p className="muted" style={{ fontSize: "0.73rem", marginTop: 10, marginBottom: 0 }}>
+            This guide disappears once you have account activity.
+          </p>
         </div>
       )}
 
@@ -768,11 +874,17 @@ function DashboardPage() {
         </div>
         {loading && <SkeletonLoader rows={4} widths={[100, 100, 100, 100]} />}
         {!loading && activity.length === 0 && (
-          <div style={{ padding: "16px 0", textAlign: "center" }}>
-            <p className="muted" style={{ marginBottom: 8 }}>No transactions yet.</p>
-            <Link to="/topup" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
-              Make your first top-up →
-            </Link>
+          <div style={{ padding: "20px 0", textAlign: "center" }}>
+            <p style={{ fontSize: "1.6rem", margin: "0 0 8px" }}>📭</p>
+            <p className="muted" style={{ marginBottom: 10, fontWeight: 500 }}>No transactions yet</p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <Link to="/vouchers" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+                🎟 Redeem voucher →
+              </Link>
+              <Link to="/topup" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+                💳 Top up →
+              </Link>
+            </div>
           </div>
         )}
         {!loading && activity.map((e) => {
@@ -999,8 +1111,9 @@ function TransferPage() {
   const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
-    const rlusd = getAccountBySymbol(accounts, "RLUSD");
-    if (!assetId && rlusd?.asset_id) setAssetId(rlusd.asset_id);
+    if (assetId || !accounts.length) return;
+    const preferred = getAccountBySymbol(accounts, "RLUSD") ?? accounts[0];
+    if (preferred?.asset_id) setAssetId(preferred.asset_id);
   }, [accounts, assetId]);
 
   const selectedAcc = accounts.find((a) => a.asset_id === assetId);
@@ -1048,6 +1161,26 @@ function TransferPage() {
           Back
         </button>
       </header>
+
+      {/* Internal ledger transfer education box */}
+      <div
+        style={{
+          background: "rgba(16,185,129,0.07)",
+          border: "1px solid rgba(16,185,129,0.22)",
+          borderRadius: 10,
+          padding: "12px 16px",
+          marginBottom: 18,
+          fontSize: "0.82rem",
+          lineHeight: 1.6,
+        }}
+      >
+        <p style={{ fontWeight: 700, marginBottom: 4, fontSize: "0.88rem" }}>⚡ Internal LumixPay transfer</p>
+        <p className="muted" style={{ margin: 0 }}>
+          Send moves balances <strong>instantly inside LumixPay</strong>. It does not create an XRPL transaction
+          and does not change the recipient's XRPL Testnet wallet balance.
+          To settle funds on-chain, use <Link to="/withdraw" style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>Withdraw</Link>.
+        </p>
+      </div>
 
       {errorMsg && <FeedbackBanner type="error" message={errorMsg} />}
 
@@ -1165,52 +1298,114 @@ function TransferPage() {
 // Withdraw page (form)
 // ─────────────────────────────────────────────────────────────────────────────
 
+type WithdrawDestinationType = "address" | "username";
+
+type DestinationResolution = {
+  destinationAddress: string;
+  resolvedFrom: "address" | "username";
+  destinationUserId?: string;
+  destinationUsername?: string;
+};
+
+const XRPL_ADDRESS_RE = /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/;
+
 function WithdrawPage() {
   const { token } = useAuth();
   const { accounts, refresh } = useBalances();
   const { refresh: refreshNotifs } = useNotifications();
   const { addToast } = useToast();
   const navigate = useNavigate();
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
 
   const [assetId, setAssetId] = useState<string>("");
   const [grossAmount, setGrossAmount] = useState<number>(5);
-  const [xrplAddress, setXrplAddress] = useState<string>("");
+  const [destinationType, setDestinationType] = useState<WithdrawDestinationType>("address");
+  const [destinationInput, setDestinationInput] = useState<string>("");
   const [xrplTag, setXrplTag] = useState<string>("");
   const [loading, setLoading] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [step, setStep] = useState<"form" | "confirm" | "submitted">("form");
   const [withdrawalId, setWithdrawalId] = useState<string | null>(null);
+  const [destinationResolution, setDestinationResolution] = useState<DestinationResolution | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
-    const rlusd = getAccountBySymbol(accounts, "RLUSD");
-    if (!assetId && rlusd?.asset_id) setAssetId(rlusd.asset_id);
+    if (assetId || !accounts.length) return;
+    // Prefer RLUSD account; fall back to first available account
+    const preferred = getAccountBySymbol(accounts, "RLUSD") ?? accounts[0];
+    if (preferred?.asset_id) setAssetId(preferred.asset_id);
   }, [accounts, assetId]);
 
   const selectedAcc = accounts.find((a) => a.asset_id === assetId);
   const wCalc = calcFee(grossAmount);
   const exceedsBalance = selectedAcc && grossAmount > parseFloat(String(selectedAcc.balance.available));
 
+  const destinationTrimmed = destinationInput.trim();
+  const usernameNormalized = destinationTrimmed.replace(/^@+/, "");
+  const addressValid = XRPL_ADDRESS_RE.test(destinationTrimmed);
+  const usernameValid = destinationType === "username" && usernameNormalized.length > 0;
+  const destinationValid =
+    destinationType === "address" ? addressValid : usernameValid;
+
+  const buildWithdrawalPayload = () => {
+    const payload: Record<string, unknown> = {
+      asset_id: assetId,
+      gross_amount: grossAmount,
+    };
+    if (destinationType === "address") {
+      payload.xrpl_destination_address = destinationTrimmed;
+    } else {
+      payload.destination_username = usernameNormalized;
+    }
+    const tagTrim = xrplTag.trim();
+    if (tagTrim) payload.xrpl_destination_tag = Number(tagTrim);
+    return payload;
+  };
+
+  const handleReview = async () => {
+    setErrorMsg("");
+    setPreviewLoading(true);
+    try {
+      const previewBody =
+        destinationType === "address"
+          ? { xrpl_destination_address: destinationTrimmed }
+          : { destination_username: usernameNormalized };
+      const res = await apiFetch<{ ok: boolean; destinationResolution: DestinationResolution }>(
+        "/withdrawals/resolve-destination",
+        token,
+        { method: "POST", body: JSON.stringify(previewBody) }
+      );
+      setDestinationResolution(res.destinationResolution);
+      setStep("confirm");
+    } catch (err: any) {
+      const msg = friendlyError(err);
+      setErrorMsg(msg);
+      addToast(msg, "error");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const handleConfirm = async () => {
     setErrorMsg("");
     setLoading(true);
     try {
-      const payload: any = {
-        asset_id: assetId,
-        gross_amount: grossAmount,
-        xrpl_destination_address: xrplAddress.trim(),
-      };
-      const tagTrim = xrplTag.trim();
-      if (tagTrim) payload.xrpl_destination_tag = Number(tagTrim);
-      const res = await apiFetch<any>("/withdrawals", token, {
+      const res = await apiFetch<{
+        ok: boolean;
+        withdrawal?: { id: string };
+        destinationResolution?: DestinationResolution;
+        error?: string;
+      }>("/withdrawals", token, {
         method: "POST",
         headers: { "Idempotency-Key": generateIdempotencyKey() },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(buildWithdrawalPayload()),
       });
       await refresh();
       void refreshNotifs();
       setWithdrawalId(res?.withdrawal?.id ?? null);
+      setDestinationResolution(res?.destinationResolution ?? destinationResolution);
       setStep("submitted");
-      addToast("Withdrawal request submitted", "info");
+      addToast("Withdrawal submitted. Destination will settle to the resolved XRPL Testnet wallet.", "info");
     } catch (err: any) {
       const msg = friendlyError(err);
       setErrorMsg(msg);
@@ -1226,12 +1421,68 @@ function WithdrawPage() {
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
           <h2 style={{ marginBottom: 2 }}>Withdraw</h2>
-          <p className="muted" style={{ fontSize: "0.78rem" }}>Send funds to an XRPL destination address</p>
+          <p className="muted" style={{ fontSize: "0.78rem" }}>Settle to an XRPL Testnet address or another LumixPay user&apos;s username</p>
         </div>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
           Back
         </button>
       </header>
+
+      {/* How XRPL withdrawals work — education box */}
+      <div
+        style={{
+          background: "rgba(99,102,241,0.07)",
+          border: "1px solid rgba(99,102,241,0.2)",
+          borderRadius: 10,
+          padding: "12px 16px",
+          marginBottom: 18,
+          fontSize: "0.82rem",
+        }}
+      >
+        <p style={{ fontWeight: 700, marginBottom: 6, fontSize: "0.88rem" }}>⛓ XRPL Testnet settlement</p>
+        <p className="muted" style={{ margin: "0 0 8px", lineHeight: 1.6 }}>
+          Withdraw <strong>locks your internal LumixPay balance</strong> and settles the net amount to an
+          XRPL Testnet wallet. If the destination belongs to another LumixPay user, their{" "}
+          <strong>XRPL Testnet wallet balance changes</strong> — not their internal LumixPay balance.
+        </p>
+        <button
+          type="button"
+          onClick={() => setShowHowItWorks((v) => !v)}
+          style={{
+            background: "transparent",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+            fontSize: "0.8rem",
+            color: "var(--accent)",
+            fontWeight: 600,
+          }}
+        >
+          {showHowItWorks ? "▲ Hide steps" : "▼ How it works step by step"}
+        </button>
+        {showHowItWorks && (
+          <div style={{ marginTop: 10, lineHeight: 1.65 }}>
+            <ol style={{ margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 3 }}>
+              <li>Your funds are <strong>locked in escrow</strong> while the request is pending</li>
+              <li>The settlement worker (or admin) <strong>approves</strong> and routes the settlement</li>
+              <li>An <strong>XRPL Testnet transaction</strong> is signed and submitted by LumixPay</li>
+              <li>The <strong>transaction hash</strong> appears in your history once confirmed on-chain</li>
+              <li>Assets arrive in the <strong>destination XRPL Testnet wallet</strong></li>
+            </ol>
+            <p className="muted" style={{ marginTop: 8, marginBottom: 0, fontSize: "0.78rem" }}>
+              The destination wallet must have a trust line for <strong>RLUSD_TEST</strong> or <strong>EURQ_TEST</strong>.{" "}
+              <a
+                href="https://testnet.xrpl.org"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--accent)" }}
+              >
+                XRPL Testnet Explorer ↗
+              </a>
+            </p>
+          </div>
+        )}
+      </div>
 
       {errorMsg && <FeedbackBanner type="error" message={errorMsg} />}
 
@@ -1271,21 +1522,65 @@ function WithdrawPage() {
             )}
 
             <div className="form-field">
-              <label className="form-label">XRPL destination address</label>
-              <input value={xrplAddress} onChange={(e) => setXrplAddress(e.target.value)} required placeholder="r..." />
+              <label className="form-label">Destination</label>
+              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => { setDestinationType("address"); setDestinationInput(""); setErrorMsg(""); }}
+                  style={{
+                    flex: 1,
+                    padding: "8px 10px",
+                    fontSize: "0.82rem",
+                    background: destinationType === "address" ? "var(--accent)" : "var(--surface2)",
+                    color: destinationType === "address" ? "#fff" : "var(--text)",
+                    border: `1px solid ${destinationType === "address" ? "var(--accent)" : "var(--border)"}`,
+                    borderRadius: 8,
+                    fontWeight: destinationType === "address" ? 600 : 400,
+                  }}
+                >
+                  XRPL address
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setDestinationType("username"); setDestinationInput(""); setErrorMsg(""); }}
+                  style={{
+                    flex: 1,
+                    padding: "8px 10px",
+                    fontSize: "0.82rem",
+                    background: destinationType === "username" ? "var(--accent)" : "var(--surface2)",
+                    color: destinationType === "username" ? "#fff" : "var(--text)",
+                    border: `1px solid ${destinationType === "username" ? "var(--accent)" : "var(--border)"}`,
+                    borderRadius: 8,
+                    fontWeight: destinationType === "username" ? 600 : 400,
+                  }}
+                >
+                  LumixPay username
+                </button>
+              </div>
+              <input
+                value={destinationInput}
+                onChange={(e) => setDestinationInput(e.target.value)}
+                required
+                placeholder={destinationType === "address" ? "r..." : "@username"}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <span className="form-hint">
+                Use an XRPL Testnet address or another LumixPay user&apos;s username.
+              </span>
             </div>
 
             <div className="form-field">
               <label className="form-label">Destination tag <span style={{ fontWeight: 400, color: "var(--muted)" }}>(optional)</span></label>
               <input placeholder="e.g. 12345" value={xrplTag} onChange={(e) => setXrplTag(e.target.value)} inputMode="numeric" />
-              <span className="form-hint">Required by some exchanges (e.g. Bitso, Kraken). Check with your destination before sending.</span>
+              <span className="form-hint">Optional — only if your destination wallet requires a destination tag.</span>
             </div>
 
             <button
-              onClick={() => setStep("confirm")}
-              disabled={!assetId || !xrplAddress.trim() || grossAmount <= 0 || !!exceedsBalance}
+              onClick={() => void handleReview()}
+              disabled={!assetId || !destinationValid || grossAmount <= 0 || !!exceedsBalance || previewLoading}
             >
-              Review Withdrawal
+              {previewLoading ? "Resolving destination…" : "Review Withdrawal"}
             </button>
           </div>
         </div>
@@ -1302,13 +1597,39 @@ function WithdrawPage() {
             <ConfirmRow label="Gross amount" value={`${grossAmount} ${selectedAcc?.asset.display_symbol ?? ""}`} />
             <ConfirmRow label="Platform fee (1%)" value={`${wCalc.fee} ${selectedAcc?.asset.display_symbol ?? ""}`} />
             <ConfirmRow label="Net to escrow" value={`${wCalc.net} ${selectedAcc?.asset.display_symbol ?? ""}`} highlight />
-            <ConfirmRow label="Destination" value={<code style={{ fontSize: "0.75rem", wordBreak: "break-all" }}>{xrplAddress.trim()}</code>} />
+            {destinationType === "username" ? (
+              <>
+                <ConfirmRow
+                  label="Destination"
+                  value={`@${destinationResolution?.destinationUsername ?? usernameNormalized}`}
+                />
+                {destinationResolution?.destinationAddress && (
+                  <ConfirmRow
+                    label="Resolved XRPL address"
+                    value={
+                      <code style={{ fontSize: "0.75rem", wordBreak: "break-all" }}>
+                        {destinationResolution.destinationAddress}
+                      </code>
+                    }
+                  />
+                )}
+              </>
+            ) : (
+              <ConfirmRow
+                label="Destination"
+                value={
+                  <code style={{ fontSize: "0.75rem", wordBreak: "break-all" }}>
+                    {destinationResolution?.destinationAddress ?? destinationTrimmed}
+                  </code>
+                }
+              />
+            )}
             {xrplTag.trim() && <ConfirmRow label="Destination tag" value={xrplTag.trim()} />}
-            <ConfirmRow label="Settlement" value={<span className="settle-tag on-chain">XRPL (Phase 2)</span>} />
+            <ConfirmRow label="Settlement" value={<span className="settle-tag on-chain">XRPL Testnet</span>} />
           </div>
           <InlineHelp>Net amount is locked in escrow. A LumixPay operator will review and approve before on-chain settlement.</InlineHelp>
           <p className="muted" style={{ fontSize: "0.75rem", margin: "10px 0 0", padding: "7px 10px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
-            ⚠ Settlement is currently simulated in this phase. Status and any transaction hash shown are mock outputs. Live XRPL settlement will be enabled in a future phase.
+            Approved withdrawals are usually settled automatically within ~30 seconds. A transaction hash will appear in your notifications and History once confirmed on XRPL Testnet.
           </p>
           <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
             <button onClick={() => setStep("form")} style={{ background: "var(--surface)", border: "1px solid var(--border)", flex: 1 }}>
@@ -1326,8 +1647,25 @@ function WithdrawPage() {
           <div className="success-screen" style={{ paddingBottom: 8 }}>
             <div className="success-icon" style={{ background: "color-mix(in srgb,#3b82f6 14%,var(--surface))", fontSize: "1.3rem" }}>&#128336;</div>
             <div className="success-title">Withdrawal request submitted</div>
-            <div className="success-sub">Your funds are locked in escrow and awaiting admin review.</div>
+            <div className="success-sub">
+              Withdrawal submitted. Destination will settle to the resolved XRPL Testnet wallet.
+            </div>
           </div>
+          {destinationResolution && (
+            <div className="confirm-panel" style={{ marginTop: 12 }}>
+              {destinationResolution.resolvedFrom === "username" && destinationResolution.destinationUsername && (
+                <ConfirmRow label="Destination" value={`@${destinationResolution.destinationUsername}`} />
+              )}
+              <ConfirmRow
+                label="Resolved XRPL address"
+                value={
+                  <code style={{ fontSize: "0.75rem", wordBreak: "break-all" }}>
+                    {destinationResolution.destinationAddress}
+                  </code>
+                }
+              />
+            </div>
+          )}
           <div className="tx-timeline">
             <div className="tx-step done">
               <div>
@@ -1344,7 +1682,7 @@ function WithdrawPage() {
             <div className="tx-step">
               <div>
                 <div className="tx-step-label">On-chain settlement</div>
-                <div className="tx-step-sub">Approved withdrawals settle to your XRPL address (Phase 2)</div>
+                <div className="tx-step-sub">Approved withdrawals settle to your XRPL Testnet wallet automatically</div>
               </div>
             </div>
           </div>
@@ -1353,10 +1691,24 @@ function WithdrawPage() {
               Reference: <code>{withdrawalId}</code>
             </p>
           )}
-          <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "center" }}>
+          <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "center", flexWrap: "wrap" }}>
+            <Link to="/history" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600, padding: "8px 0" }}>
+              Track in History →
+            </Link>
+            <Link to="/notifications" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600, padding: "8px 0" }}>
+              View notifications →
+            </Link>
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 8, justifyContent: "center" }}>
             <button onClick={() => navigate("/dashboard")}>Back to dashboard</button>
             <button
-              onClick={() => { setStep("form"); setWithdrawalId(null); setErrorMsg(""); }}
+              onClick={() => {
+                setStep("form");
+                setWithdrawalId(null);
+                setDestinationResolution(null);
+                setDestinationInput("");
+                setErrorMsg("");
+              }}
               style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
             >
               New withdrawal
@@ -1399,39 +1751,127 @@ const ENTRY_ICON: Record<string, string> = {
   recurring:          "↻",
 };
 
+/** One on-chain transaction from GET /me/wallet/transactions (XRPL Testnet only). */
+interface XrplWalletTransaction {
+  hash:               string;
+  type:               "Payment" | "TrustSet";
+  direction:          "IN" | "OUT" | "SYSTEM";
+  currency:           string;
+  trustLineCurrency?: string;
+  amount:             string;
+  counterparty:       string;
+  status:             "confirmed" | "failed";
+  ledgerIndex?:       number;
+  timestamp:          string | null;
+  explorerUrl:        string;
+}
+
+const HISTORY_FILTERS = ["All", "Internal", "XRPL", "Transfers", "Withdrawals", "Top Ups"] as const;
+
+type HistoryTimelineItem =
+  | { source: "internal"; id: string; timestamp: string; entry: any }
+  | { source: "xrpl"; id: string; timestamp: string; tx: XrplWalletTransaction };
+
+function matchesHistoryFilter(item: HistoryTimelineItem, filter: string): boolean {
+  if (filter === "All") return true;
+  if (filter === "Internal") return item.source === "internal";
+  if (filter === "XRPL") return item.source === "xrpl";
+  if (filter === "Transfers") {
+    return item.source === "internal" && item.entry.entry_type === "transfer";
+  }
+  if (filter === "Top Ups") {
+    return item.source === "internal" && ["topup", "voucher_redeem"].includes(item.entry.entry_type);
+  }
+  if (filter === "Withdrawals") {
+    if (item.source === "internal") {
+      return ["withdrawal_lock", "withdrawal_unlock", "withdrawal_settle"].includes(item.entry.entry_type);
+    }
+    return item.tx.type === "Payment" && item.tx.direction === "OUT";
+  }
+  return true;
+}
+
 function HistoryPage() {
   const { token } = useAuth();
   const { accounts } = useBalances();
   const navigate = useNavigate();
 
-  const [accountId, setAccountId] = useState<string>("");
-  const [entries, setEntries] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [accountId, setAccountId]       = useState<string>("");
+  const [entries, setEntries]           = useState<any[]>([]);
+  const [walletTxs, setWalletTxs]       = useState<XrplWalletTransaction[]>([]);
+  const [loadingLedger, setLoadingLedger] = useState(false);
+  const [loadingXrpl, setLoadingXrpl]   = useState(false);
+  const [ledgerError, setLedgerError]   = useState("");
+  const [xrplMsg, setXrplMsg]           = useState("");
+  const [typeFilter, setTypeFilter]     = useState<string>("All");
 
-  // Default to first account once accounts are available
   useEffect(() => {
     if (!accountId && accounts.length > 0) {
       setAccountId(accounts[0]!.id);
     }
   }, [accounts, accountId]);
 
-  // Fetch history whenever the selected account changes
   useEffect(() => {
     if (!accountId || !token) return;
-    setLoading(true);
-    setError("");
-    apiFetch<{ entries: any[] }>(`/me/accounts/${accountId}/history?limit=50`, token)
+    setLoadingLedger(true);
+    setLedgerError("");
+    apiFetch<{ entries: any[] }>(`/me/accounts/${accountId}/history?limit=100`, token)
       .then((d) => setEntries(d.entries ?? []))
-      .catch((e: any) => setError(e.message ?? "Failed to load history"))
-      .finally(() => setLoading(false));
+      .catch((e: any) => setLedgerError(friendlyError(e)))
+      .finally(() => setLoadingLedger(false));
   }, [accountId, token]);
 
+  useEffect(() => {
+    if (!token) return;
+    setLoadingXrpl(true);
+    setXrplMsg("");
+    apiFetch<{
+      ok?: boolean;
+      transactions?: XrplWalletTransaction[];
+      status?: string;
+      message?: string;
+    }>("/me/wallet/transactions?limit=50", token)
+      .then((d) => {
+        if (d.ok && d.transactions) {
+          setWalletTxs(d.transactions);
+        } else if (d.status === "no_wallet" || d.status === "not_funded") {
+          setWalletTxs([]);
+        } else if (d.status === "xrpl_testnet_unavailable") {
+          setWalletTxs([]);
+          setXrplMsg("XRPL Testnet history is temporarily unavailable.");
+        } else {
+          setWalletTxs([]);
+        }
+      })
+      .catch(() => {
+        setWalletTxs([]);
+        setXrplMsg("Could not load XRPL Testnet history. Internal ledger entries are still shown.");
+      })
+      .finally(() => setLoadingXrpl(false));
+  }, [token]);
+
   const selectedAcc = accounts.find((a) => a.id === accountId);
+  const loading = loadingLedger || loadingXrpl;
+
+  const timeline = useMemo((): HistoryTimelineItem[] => {
+    const items: HistoryTimelineItem[] = [];
+    for (const e of entries) {
+      items.push({ source: "internal", id: `int-${e.id}`, timestamp: e.created_at, entry: e });
+    }
+    for (const tx of walletTxs) {
+      if (!tx.timestamp) continue;
+      items.push({ source: "xrpl", id: `xrpl-${tx.hash}`, timestamp: tx.timestamp, tx });
+    }
+    return items.sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+  }, [entries, walletTxs]);
+
+  const filteredTimeline = timeline.filter((item) => matchesHistoryFilter(item, typeFilter));
 
   return (
     <div style={{ maxWidth: 720, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <h2>Transaction History</h2>
         <button
           onClick={() => navigate("/dashboard")}
@@ -1441,55 +1881,240 @@ function HistoryPage() {
         </button>
       </header>
 
-      <div style={{ marginBottom: 16 }}>
-        <label className="muted" style={{ display: "block", marginBottom: 6 }}>
-          Account
-        </label>
-        <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+      <p className="muted" style={{ fontSize: "0.78rem", lineHeight: 1.55, marginBottom: 16 }}>
+        History combines <strong>internal LumixPay ledger activity</strong> and{" "}
+        <strong>XRPL Testnet wallet activity</strong>. Internal entries affect your app balance;
+        XRPL entries are on-chain testnet transactions.
+      </p>
+
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+        <select
+          value={accountId}
+          onChange={(e) => setAccountId(e.target.value)}
+          style={{ minWidth: 160 }}
+        >
           {accounts.map((a) => (
             <option key={a.id} value={a.id}>
               {a.asset.display_symbol} — {a.asset.display_name}
             </option>
           ))}
         </select>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {HISTORY_FILTERS.map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setTypeFilter(f)}
+              style={{
+                padding: "4px 12px",
+                fontSize: "0.8rem",
+                background: typeFilter === f ? "var(--accent)" : "var(--surface2)",
+                color: typeFilter === f ? "#fff" : "var(--text)",
+                border: "1px solid var(--border)",
+                borderRadius: 20,
+                cursor: "pointer",
+                fontWeight: typeFilter === f ? 600 : 400,
+              }}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading && <SkeletonLoader rows={5} widths={[100,100,100,100,100]} />}
-      {error && <FeedbackBanner type="error" message={error} />}
-      {!loading && !error && entries.length === 0 && (
-        <p className="muted" style={{ padding: "12px 0" }}>No transactions recorded for this account yet.</p>
+      {ledgerError && <FeedbackBanner type="error" message={ledgerError} />}
+      {xrplMsg && !loading && (
+        <p className="muted" style={{ fontSize: "0.78rem", marginBottom: 10 }}>{xrplMsg}</p>
+      )}
+      {!loading && !ledgerError && filteredTimeline.length === 0 && (
+        <div style={{ textAlign: "center", padding: "32px 0" }}>
+          <p style={{ fontSize: "2rem", marginBottom: 10 }}>📭</p>
+          <p className="muted" style={{ fontWeight: 500, marginBottom: 8 }}>
+            {typeFilter === "All"
+              ? "No activity recorded yet"
+              : "No transactions found for this filter."}
+          </p>
+          {typeFilter === "All" && (
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <Link to="/vouchers" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+                Redeem voucher →
+              </Link>
+              <Link to="/topup" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+                Top up →
+              </Link>
+            </div>
+          )}
+          {typeFilter === "Internal" && (
+            <Link to="/vouchers" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+              Fund your account →
+            </Link>
+          )}
+          {typeFilter === "Top Ups" && (
+            <Link to="/vouchers" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+              Redeem a voucher →
+            </Link>
+          )}
+          {typeFilter === "Transfers" && (
+            <Link to="/transfer" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+              Send your first transfer →
+            </Link>
+          )}
+          {typeFilter === "Withdrawals" && (
+            <Link to="/withdraw" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+              Withdraw to an XRPL Testnet wallet →
+            </Link>
+          )}
+          {typeFilter === "XRPL" && (
+            <Link to="/profile" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+              Set up your XRPL Testnet wallet →
+            </Link>
+          )}
+        </div>
       )}
 
-      <div className="tx-list-scroll" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {entries.map((e) => {
-          const incoming = e.credit_account_id === accountId;
-          const sign = incoming ? "+" : "−";
-          const color = incoming ? "var(--success)" : "var(--muted)";
-          const icon = ENTRY_ICON[e.entry_type] ?? "·";
-          const counterpartyLabel = e.entry_type === "transfer" && e.counterparty
-            ? (incoming ? "From " : "To ") + (e.counterparty.username ? `@${e.counterparty.username}` : `${e.counterparty.id.slice(0, 8)}…`)
-            : null;
-          return (
-            <div
-              key={e.id}
-              className="card"
-              style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.9rem", flexShrink: 0 }}>{icon}</span>
-                <div>
-                  <p style={{ fontWeight: 600, fontSize: "0.9rem" }}>
-                    {ENTRY_LABEL[e.entry_type] ?? e.entry_type}
+      <div className="history-timeline">
+        {filteredTimeline.map((item) => {
+          if (item.source === "internal") {
+            const e = item.entry;
+            const incoming = e.credit_account_id === accountId;
+            const sign = incoming ? "+" : "−";
+            const amountClass = incoming
+              ? "history-card-amount history-card-amount--pos"
+              : "history-card-amount history-card-amount--neg";
+            const icon = ENTRY_ICON[e.entry_type] ?? "·";
+            const assetSymbol = selectedAcc?.asset.display_symbol ?? "";
+            const counterpartyLabel = e.entry_type === "transfer" && e.counterparty
+              ? (incoming ? "From " : "To ") + (e.counterparty.username ? `@${e.counterparty.username}` : `${e.counterparty.id.slice(0, 8)}…`)
+              : null;
+            const isSettledWithdrawal = e.entry_type === "withdrawal_settle";
+            const txHash = e.xrpl_tx_hash && !String(e.xrpl_tx_hash).startsWith("mock_")
+              ? String(e.xrpl_tx_hash)
+              : null;
+            const hasDetails = !!(counterpartyLabel || (isSettledWithdrawal && txHash));
+
+            return (
+              <div key={item.id} className="card history-card">
+                {/* Row 1: icon, title, source badge */}
+                <div className="history-card-row1">
+                  <span className="history-card-icon">{icon}</span>
+                  <div className="history-card-head">
+                    <div className="history-card-title-line">
+                      <p className="history-card-title">{ENTRY_LABEL[e.entry_type] ?? e.entry_type}</p>
+                      <span className="history-badge-internal">INTERNAL</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Row 2: date/time, asset, amount */}
+                <div className="history-card-row2">
+                  <div className="history-card-row2-meta">
+                    <span className="muted">{new Date(e.created_at).toLocaleString()}</span>
+                    <span className="muted" style={{ fontSize: "0.75rem" }}>{assetSymbol}</span>
+                  </div>
+                  <p className={amountClass}>
+                    {sign}{formatMoney(e.amount)}{" "}
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>{assetSymbol}</span>
                   </p>
-                  {counterpartyLabel && (
-                    <p className="muted" style={{ fontSize: "0.73rem", fontWeight: 500 }}>{counterpartyLabel}</p>
-                  )}
-                  <p className="muted" style={{ fontSize: "0.73rem" }}>{new Date(e.created_at).toLocaleString()}</p>
+                </div>
+
+                {/* Row 3: details */}
+                {hasDetails && (
+                  <div className="history-card-row3">
+                    {counterpartyLabel && (
+                      <span className="muted">{counterpartyLabel}</span>
+                    )}
+                    {isSettledWithdrawal && txHash && (
+                      <>
+                        <span className="muted">Settlement TX:</span>
+                        <code style={{ fontSize: "0.75rem" }}>{truncateTxHash(txHash)}</code>
+                        <a
+                          href={`https://testnet.xrpl.org/transactions/${txHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}
+                        >
+                          View on XRPL Explorer ↗
+                        </a>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          const tx = item.tx;
+          const isIn  = tx.direction === "IN";
+          const isOut = tx.direction === "OUT";
+          const isSys = tx.direction === "SYSTEM";
+          const dirLabel = isIn ? "Received" : isOut ? "Sent" : "Trust Line";
+          const dirIcon = isIn ? "↙" : isOut ? "↗" : "⚙";
+          const assetLabel = isSys && tx.trustLineCurrency ? tx.trustLineCurrency : tx.currency;
+          const shortCp = tx.counterparty.length > 14
+            ? `${tx.counterparty.slice(0, 7)}…${tx.counterparty.slice(-4)}`
+            : tx.counterparty;
+          const amountClass = isIn
+            ? "history-card-amount history-card-amount--pos"
+            : isOut
+            ? "history-card-amount history-card-amount--neg"
+            : "history-card-amount history-card-amount--muted";
+          const amountSign = isIn ? "+" : isOut ? "−" : "";
+          const cpLabel = isSys ? "Counterparty" : isIn ? "From" : "To";
+
+          return (
+            <div key={item.id} className="card history-card">
+              {/* Row 1: icon, title, source + status badges */}
+              <div className="history-card-row1">
+                <span
+                  className="history-card-icon"
+                  style={{ color: isIn ? "var(--success)" : isOut ? "var(--error, #f87171)" : "var(--muted)" }}
+                >
+                  {dirIcon}
+                </span>
+                <div className="history-card-head">
+                  <div className="history-card-title-line">
+                    <p className="history-card-title">{dirLabel}</p>
+                    <span className="history-badge-xrpl">XRPL TESTNET</span>
+                    <span
+                      className={`history-badge-status status-badge ${tx.status === "confirmed" ? "badge-active" : "badge-suspended"}`}
+                    >
+                      {tx.status}
+                    </span>
+                  </div>
                 </div>
               </div>
-              <p style={{ fontWeight: 700, fontSize: "1rem", color, flexShrink: 0 }}>
-                {sign}{formatMoney(e.amount)} <span style={{ fontSize: "0.78rem", fontWeight: 600 }}>{selectedAcc?.asset.display_symbol ?? ""}</span>
-              </p>
+
+              {/* Row 2: date/time, asset, amount */}
+              <div className="history-card-row2">
+                <div className="history-card-row2-meta">
+                  <span className="muted">
+                    {tx.timestamp ? new Date(tx.timestamp).toLocaleString() : "–"}
+                  </span>
+                  <span className="muted" style={{ fontSize: "0.75rem" }}>{assetLabel}</span>
+                </div>
+                {tx.amount !== "-" && (
+                  <p className={amountClass}>
+                    {amountSign}{tx.amount}{" "}
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>{assetLabel}</span>
+                  </p>
+                )}
+              </div>
+
+              {/* Row 3: counterparty, tx hash, explorer */}
+              <div className="history-card-row3">
+                <span className="muted">{cpLabel}: {shortCp}</span>
+                <span className="muted">TX:</span>
+                <code style={{ fontSize: "0.75rem" }}>{truncateTxHash(tx.hash)}</code>
+                <a
+                  href={tx.explorerUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}
+                >
+                  View on XRPL Explorer ↗
+                </a>
+              </div>
             </div>
           );
         })}
@@ -1501,6 +2126,17 @@ function HistoryPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Admin Withdrawals page  /admin/withdrawals
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Diagnostics result from GET /withdrawals/admin/:id/diagnostics */
+interface DiagnosticsData {
+  accountExists:        boolean;
+  xrpBalance:           string | null;
+  requiredIssuer:       string;
+  requiredCurrency:     string;
+  hasRequiredTrustLine: boolean;
+  ready:                boolean;
+  message:              string;
+}
 
 interface AdminWithdrawal {
   id: string;
@@ -1514,6 +2150,12 @@ interface AdminWithdrawal {
   status: string;
   admin_note: string | null;
   created_at: string;
+  // Settlement tracking (migration 019)
+  xrpl_tx_hash: string | null;
+  settlement_provider: string | null;
+  xrpl_submitted_at: string | null;
+  xrpl_confirmed_at: string | null;
+  xrpl_network_fee_xrp: string | null;
 }
 
 function AdminWithdrawalsPage() {
@@ -1526,6 +2168,12 @@ function AdminWithdrawalsPage() {
   const [statusFilter, setStatusFilter] = useState("pending");
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectNote, setRejectNote] = useState("");
+  const [settlingId, setSettlingId] = useState<string | null>(null);
+  const [diagLoadingId, setDiagLoadingId] = useState<string | null>(null);
+  const [diagResults, setDiagResults] = useState<Record<string, DiagnosticsData | { error: string }>>({});
+  const [settleErrById, setSettleErrById] = useState<Record<string, { msg: string; friendly?: string; txHash?: string }>>({});
+  const [cancelConfirmId, setCancelConfirmId] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState("");
 
   const load = useCallback(async () => {
@@ -1563,6 +2211,73 @@ function AdminWithdrawalsPage() {
     }
   };
 
+  const settle = async (id: string) => {
+    setActionMsg("");
+    setSettlingId(id);
+    setSettleErrById(prev => { const n = { ...prev }; delete n[id]; return n; });
+    try {
+      await apiFetch(`/withdrawals/admin/${id}/settle`, token, { method: "POST" });
+      setActionMsg("Withdrawal settled on XRPL Testnet. ✅");
+      void load();
+    } catch (e: any) {
+      const msg: string = e.message ?? "Settlement failed.";
+      const body = e.responseBody ?? {};
+      if (msg.includes("SETTLEMENT_IN_FLIGHT") || e.status === 409) {
+        setSettleErrById(prev => ({
+          ...prev,
+          [id]: { msg: "Settlement already in progress. Check the withdrawal row before retrying." },
+        }));
+      } else {
+        const friendly = body.friendlyError ?? friendlyError({ message: msg });
+        setSettleErrById(prev => ({
+          ...prev,
+          [id]: {
+            msg,
+            friendly,
+            txHash: body.txHash ?? undefined,
+          },
+        }));
+      }
+    } finally {
+      setSettlingId(null);
+    }
+  };
+
+  const checkDestination = async (id: string) => {
+    if (diagLoadingId) return;
+    setDiagLoadingId(id);
+    setDiagResults(prev => { const n = { ...prev }; delete n[id]; return n; });
+    try {
+      const data = await apiFetch(`/withdrawals/admin/${id}/diagnostics`, token, {});
+      setDiagResults(prev => ({ ...prev, [id]: data.diagnostics as DiagnosticsData }));
+    } catch (e: any) {
+      setDiagResults(prev => ({
+        ...prev,
+        [id]: { error: e.message ?? "Diagnostic check failed" },
+      }));
+    } finally {
+      setDiagLoadingId(null);
+    }
+  };
+
+  const cancelApproved = async (id: string) => {
+    setCancelConfirmId(null);
+    setCancellingId(id);
+    setActionMsg("");
+    try {
+      await apiFetch(`/withdrawals/admin/${id}/cancel-approved`, token, {
+        method: "POST",
+        body: JSON.stringify({ reason: "Cancelled by admin — destination not ready" }),
+      });
+      setActionMsg("Withdrawal cancelled and funds returned. ✅");
+      void load();
+    } catch (e: any) {
+      setActionMsg(e.message ?? "Cancel failed");
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
   // Non-admins see an access-denied message instead of a crash
   if (user?.role !== "admin") {
     return (
@@ -1585,9 +2300,9 @@ function AdminWithdrawalsPage() {
         </button>
       </header>
 
-      {/* Settlement phase notice */}
+      {/* Settlement notice */}
       <p className="muted" style={{ fontSize: "0.78rem", marginBottom: 14, padding: "8px 12px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
-        ⚠ Settlement is currently simulated (Phase 1). Status transitions and any tx hash shown are mock outputs. Live XRPL settlement will be enabled in Phase 2.
+        Settlement is executed via the configured <code>SETTLEMENT_PROVIDER</code>. When set to <code>xrpl_testnet</code>, the "Settle" button triggers a real XRPL Testnet payment from the treasury/issuer wallet. Mock provider produces simulated hashes with no network call.
       </p>
 
       {/* Status filter tabs */}
@@ -1724,6 +2439,222 @@ function AdminWithdrawalsPage() {
                 )}
               </div>
             )}
+
+            {/* Settle + Check destination + Cancel — only for approved withdrawals */}
+            {w.status === "approved" && (
+              <div style={{ marginTop: 12 }}>
+                {/* Action buttons row */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <button
+                    type="button"
+                    onClick={() => void settle(w.id)}
+                    disabled={settlingId === w.id || diagLoadingId === w.id || cancellingId === w.id}
+                    style={{ background: "var(--success)", minWidth: 120 }}
+                  >
+                    {settlingId === w.id ? "Settling…" : "⚡ Settle"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void checkDestination(w.id)}
+                    disabled={diagLoadingId === w.id || settlingId === w.id || cancellingId === w.id}
+                    style={{ background: "var(--surface2)", color: "var(--text)", minWidth: 140, fontSize: "0.85rem" }}
+                  >
+                    {diagLoadingId === w.id ? "Checking…" : "🔍 Check destination"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCancelConfirmId(cancelConfirmId === w.id ? null : w.id)}
+                    disabled={settlingId === w.id || diagLoadingId === w.id || cancellingId === w.id}
+                    style={{ background: "var(--danger, #dc2626)", minWidth: 140, fontSize: "0.85rem" }}
+                  >
+                    {cancellingId === w.id ? "Cancelling…" : "✕ Cancel / Refund"}
+                  </button>
+                </div>
+
+                {/* Cancel confirmation prompt */}
+                {cancelConfirmId === w.id && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: "10px 14px",
+                      background: "rgba(220,38,38,0.07)",
+                      border: "1px solid rgba(220,38,38,0.3)",
+                      borderRadius: 8,
+                      fontSize: "0.85rem",
+                    }}
+                  >
+                    <p style={{ margin: "0 0 8px 0", fontWeight: 600 }}>
+                      Cancel this approved withdrawal and return funds to the user?
+                    </p>
+                    <p className="muted" style={{ margin: "0 0 10px 0", fontSize: "0.78rem" }}>
+                      The net withdrawal amount will be returned to the user's available balance.
+                      The fee is not refunded. This action cannot be undone.
+                    </p>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => void cancelApproved(w.id)}
+                        style={{ background: "var(--danger, #dc2626)", fontSize: "0.85rem", padding: "5px 14px" }}
+                      >
+                        Yes, cancel &amp; refund
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCancelConfirmId(null)}
+                        style={{ background: "var(--surface2)", color: "var(--text)", fontSize: "0.85rem", padding: "5px 14px" }}
+                      >
+                        Keep approved
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <p className="muted" style={{ marginTop: 5, fontSize: "0.73rem" }}>
+                  Approved withdrawals are automatically processed by the XRPL settlement worker every 30 s.
+                  Use <strong>⚡ Settle</strong> as a manual override or <strong>✕ Cancel / Refund</strong> if the destination is not ready.
+                </p>
+
+                {/* Settlement error display */}
+                {settleErrById[w.id] && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: "10px 12px",
+                      background: "rgba(220,38,38,0.08)",
+                      border: "1px solid rgba(220,38,38,0.25)",
+                      borderRadius: 8,
+                    }}
+                  >
+                    {settleErrById[w.id].friendly ? (
+                      <>
+                        <p style={{ margin: "0 0 4px 0", fontWeight: 600, fontSize: "0.85rem", color: "var(--danger, #dc2626)" }}>
+                          Settlement could not complete
+                        </p>
+                        <p style={{ margin: "0 0 6px 0", fontSize: "0.85rem" }}>
+                          {settleErrById[w.id].friendly}
+                        </p>
+                        <p className="muted" style={{ margin: 0, fontSize: "0.72rem" }}>
+                          Technical: {settleErrById[w.id].msg}
+                          {settleErrById[w.id].txHash && settleErrById[w.id].txHash !== "NO_SEQUENCE" && (
+                            <> · txHash: {settleErrById[w.id].txHash}</>
+                          )}
+                        </p>
+                      </>
+                    ) : (
+                      <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--danger, #dc2626)" }}>
+                        ✗ {settleErrById[w.id].msg}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Destination diagnostics panel */}
+                {diagResults[w.id] && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: "10px 12px",
+                      background: "var(--surface2)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      fontSize: "0.83rem",
+                    }}
+                  >
+                    {"error" in diagResults[w.id] ? (
+                      <p style={{ margin: 0, color: "var(--danger, #dc2626)" }}>
+                        ✗ {(diagResults[w.id] as { error: string }).error}
+                      </p>
+                    ) : (() => {
+                      const d = diagResults[w.id] as DiagnosticsData;
+                      return (
+                        <>
+                          <p style={{ margin: "0 0 6px 0", fontWeight: 600 }}>
+                            Destination readiness check
+                          </p>
+                          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                            <tbody>
+                              <tr>
+                                <td className="muted" style={{ padding: "2px 8px 2px 0", whiteSpace: "nowrap" }}>XRPL account funded</td>
+                                <td style={{ padding: "2px 0", fontWeight: 600, color: d.accountExists ? "var(--success, #16a34a)" : "var(--danger, #dc2626)" }}>
+                                  {d.accountExists ? `YES ✓  (${d.xrpBalance ?? "?"} XRP)` : "NO ✗"}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td className="muted" style={{ padding: "2px 8px 2px 0", whiteSpace: "nowrap" }}>Required trust line</td>
+                                <td style={{ padding: "2px 0", fontWeight: 600, color: d.hasRequiredTrustLine ? "var(--success, #16a34a)" : "var(--danger, #dc2626)" }}>
+                                  {d.hasRequiredTrustLine ? `YES ✓` : "NO ✗"}{" "}
+                                  <span className="muted" style={{ fontWeight: 400 }}>({d.requiredCurrency})</span>
+                                </td>
+                              </tr>
+                              <tr>
+                                <td className="muted" style={{ padding: "2px 8px 2px 0", whiteSpace: "nowrap" }}>Ready for settlement</td>
+                                <td style={{ padding: "2px 0", fontWeight: 700, color: d.ready ? "var(--success, #16a34a)" : "var(--warning, #d97706)" }}>
+                                  {d.ready ? "YES ✓" : "NO ✗"}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                          <p
+                            style={{
+                              marginTop: 8,
+                              marginBottom: 0,
+                              padding: "6px 8px",
+                              borderRadius: 6,
+                              fontSize: "0.80rem",
+                              background: d.ready
+                                ? "rgba(22,163,74,0.08)"
+                                : "rgba(217,119,6,0.10)",
+                              border: `1px solid ${d.ready ? "rgba(22,163,74,0.25)" : "rgba(217,119,6,0.30)"}`,
+                              color: d.ready ? "var(--success, #16a34a)" : "var(--warning, #92400e)",
+                            }}
+                          >
+                            {d.message}
+                          </p>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TX hash + explorer link — shown for settled withdrawals */}
+            {w.status === "settled" && (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+                {w.settlement_provider && (
+                  <p style={{ margin: 0, fontSize: "0.73rem" }}>
+                    <span className="muted">Provider: </span>
+                    <code style={{ fontSize: "0.72rem" }}>{w.settlement_provider}</code>
+                  </p>
+                )}
+                {w.xrpl_tx_hash && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span className="muted" style={{ fontSize: "0.73rem" }}>TX:</span>
+                    <code style={{ fontSize: "0.70rem", wordBreak: "break-all" }}>
+                      {w.xrpl_tx_hash.startsWith("mock_")
+                        ? w.xrpl_tx_hash
+                        : `${w.xrpl_tx_hash.slice(0, 12)}…${w.xrpl_tx_hash.slice(-8)}`}
+                    </code>
+                    {!w.xrpl_tx_hash.startsWith("mock_") && (
+                      <a
+                        href={`https://testnet.xrpl.org/transactions/${w.xrpl_tx_hash}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ fontSize: "0.73rem", whiteSpace: "nowrap" }}
+                      >
+                        View ↗
+                      </a>
+                    )}
+                  </div>
+                )}
+                {w.xrpl_confirmed_at && (
+                  <p className="muted" style={{ margin: 0, fontSize: "0.73rem" }}>
+                    Confirmed: {new Date(w.xrpl_confirmed_at).toLocaleString()}
+                    {w.xrpl_network_fee_xrp && ` · Fee: ${w.xrpl_network_fee_xrp} XRP`}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -1758,6 +2689,7 @@ function NotificationsPage() {
     "withdrawal.approved":   "✅ Withdrawal approved",
     "withdrawal.rejected":   "❌ Withdrawal rejected",
     "withdrawal.settled":    "✔ Withdrawal settled",
+    "xrpl_wallet.received":  "⛓ XRPL wallet received",
     "voucher.redeemed":      "🎟 Voucher redeemed",
     "payment_link.paid":     "🔗 Payment link paid",
     "recurring.executed":    "🔁 Recurring payment",
@@ -1765,14 +2697,14 @@ function NotificationsPage() {
 
   return (
     <div style={{ maxWidth: 680, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
         <div>
           <h2>Notifications</h2>
           {unreadCount > 0 && (
             <p className="muted">{unreadCount} unread</p>
           )}
         </div>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {unreadCount > 0 && (
             <button
               onClick={markAllRead}
@@ -1859,33 +2791,110 @@ function NotificationsPage() {
 
       {notifications.length === 0 && (
         <div className="card" style={{ textAlign: "center", padding: 40 }}>
-          <p className="muted">No notifications yet.</p>
+          <p style={{ fontSize: "2rem", marginBottom: 10 }}>🔔</p>
+          <p style={{ fontWeight: 600, marginBottom: 6 }}>You're all caught up</p>
+          <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 12 }}>
+            Notifications appear when you send or receive funds, redeem vouchers, or when a withdrawal settles on XRPL Testnet.
+          </p>
+          <Link to="/transfer" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+            Send a transfer →
+          </Link>
         </div>
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {notifications.map((n) => (
-          <div
-            key={n.id}
-            className="card"
-            style={{
-              opacity: n.is_read ? 0.65 : 1,
-              borderLeft: n.is_read ? "3px solid var(--border)" : "3px solid var(--accent)",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-              <div style={{ flex: 1 }}>
-                <p style={{ fontWeight: n.is_read ? 400 : 700, marginBottom: 3 }}>
-                  {typeLabel[n.type] ?? n.type} — {n.title}
-                </p>
-                {n.body && <p className="muted" style={{ fontSize: "0.88rem" }}>{n.body}</p>}
+        {notifications.map((n) => {
+          const txHash = getNotificationTxHash(n.metadata);
+          const bodyText = formatNotificationBody(n.body, n.metadata);
+          return (
+            <div
+              key={n.id}
+              className="card"
+              style={{
+                opacity: n.is_read ? 0.65 : 1,
+                borderLeft: n.is_read ? "3px solid var(--border)" : "3px solid var(--accent)",
+                minWidth: 0,
+                overflow: "hidden",
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <p
+                    style={{
+                      fontWeight: n.is_read ? 400 : 700,
+                      margin: 0,
+                      flex: "1 1 200px",
+                      minWidth: 0,
+                      wordBreak: "break-word",
+                      overflowWrap: "anywhere",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    {typeLabel[n.type] ?? n.type} — {n.title}
+                  </p>
+                  <p
+                    className="muted"
+                    style={{
+                      fontSize: "0.75rem",
+                      margin: 0,
+                      flexShrink: 0,
+                      maxWidth: "100%",
+                      wordBreak: "break-word",
+                      textAlign: "right",
+                    }}
+                  >
+                    {new Date(n.created_at).toLocaleString()}
+                  </p>
+                </div>
+                {bodyText && (
+                  <p
+                    className="muted"
+                    style={{
+                      fontSize: "0.88rem",
+                      margin: 0,
+                      wordBreak: "break-word",
+                      overflowWrap: "anywhere",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {bodyText}
+                  </p>
+                )}
+                {txHash && (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      flexWrap: "wrap",
+                      fontSize: "0.78rem",
+                      marginTop: 2,
+                    }}
+                  >
+                    <span className="muted">TX:</span>
+                    <code style={{ fontSize: "0.72rem" }}>{truncateTxHash(txHash)}</code>
+                    <a
+                      href={`https://testnet.xrpl.org/transactions/${txHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600, fontSize: "0.78rem" }}
+                    >
+                      View on XRPL Explorer ↗
+                    </a>
+                  </div>
+                )}
               </div>
-              <p className="muted" style={{ fontSize: "0.75rem", whiteSpace: "nowrap" }}>
-                {new Date(n.created_at).toLocaleString()}
-              </p>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -1904,14 +2913,91 @@ type WalletChallenge = {
   xrpl_testnet_wss: string;
 };
 
+/** One issued-currency balance line from GET /me/wallet/onchain-balances. */
+interface OnchainIssuedBalance {
+  currency: string;
+  label: string;
+  issuer: string;
+  balance: string;
+}
+
+/** Full on-chain balance snapshot from GET /me/wallet/onchain-balances. */
+interface OnchainBalances {
+  xrpBalance: string;
+  reserveBalance: string;
+  availableXrpBalance: string;
+  issuedBalances: OnchainIssuedBalance[];
+}
+
+/** One record from GET /me/wallet/drops (XRPL Testnet only — no real value). */
+interface DropRecord {
+  id: string;
+  currency: string;
+  amount_decimal: string;
+  xrpl_tx_hash: string | null;
+  status: "pending" | "confirmed" | "failed";
+  error_message: string | null;
+  requested_at: string;
+  confirmed_at: string | null;
+  explorerUrl: string | null;
+}
+
 function ProfilePage() {
   const { token } = useAuth();
   const navigate = useNavigate();
   const [profile, setProfile] = useState<any>(null);
+  const [profileLoading, setProfileLoading] = useState(true);
   const [username, setUsername] = useState("");
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // ── Custodial wallet (LumixPay-managed) ──────────────────────────────────
+  const [custodialWallet, setCustodialWallet] = useState<{
+    id: string;
+    network: string;
+    classic_address: string;
+    public_key: string;
+    wallet_type: string;
+    is_active: boolean;
+    funded_at: string | null;
+    trust_lines_set_at: string | null;
+    created_at: string;
+  } | null>(null);
+  const [fundingWallet, setFundingWallet] = useState(false);
+  const [custodialWalletMsg, setCustodialWalletMsg] = useState("");
+  const [settingUpTrustLines, setSettingUpTrustLines] = useState(false);
+  const [trustLineMsg, setTrustLineMsg] = useState("");
+
+  // ── Test token drops (Phase 2C — testnet only) ────────────────────────────
+  const [requestingToken, setRequestingToken] = useState<"RLUSD" | "EURQ" | null>(null);
+  const [tokenDropMsg, setTokenDropMsg] = useState<{ text: string; ok?: boolean; explorerUrl?: string }>({ text: "" });
+  const [recentDrops, setRecentDrops] = useState<DropRecord[]>([]);
+
+  // ── On-chain balances (Phase 2D — read-only XRPL Testnet) ────────────────
+  const [onchainBalances, setOnchainBalances] = useState<OnchainBalances | null>(null);
+  const [loadingBalances, setLoadingBalances] = useState(false);
+  const [balancesError, setBalancesError] = useState("");
+
+  // ── XRPL transaction history (Phase 3B — read-only) ──────────────────────
+  const [walletTxs, setWalletTxs] = useState<XrplWalletTransaction[]>([]);
+  const [loadingWalletTxs, setLoadingWalletTxs] = useState(false);
+  const [walletTxMsg, setWalletTxMsg] = useState("");
+
+  // ── Settlement dry run (Phase 3A — developer only) ────────────────────────
+  const [dryRunDestination, setDryRunDestination] = useState("");
+  const [dryRunCurrency, setDryRunCurrency] = useState<"RLUSD" | "EURQ">("RLUSD");
+  const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [dryRunResult, setDryRunResult] = useState<{
+    ok: boolean;
+    txHash?: string;
+    explorerUrl?: string;
+    validatedAt?: string;
+    status?: string;
+    message?: string;
+    error?: string;
+  } | null>(null);
+
+  // ── BYOW wallet (user-controlled) ────────────────────────────────────────
   const [challenge, setChallenge] = useState<WalletChallenge | null>(null);
   const [wAddress, setWAddress] = useState("");
   const [wPub, setWPub] = useState("");
@@ -1921,17 +3007,263 @@ function ProfilePage() {
 
   const loadProfile = useCallback(() => {
     if (!token) return;
+    setProfileLoading(true);
     void apiFetch<{ profile: any }>("/me/profile", token)
       .then((d) => {
         setProfile(d.profile);
         setUsername(d.profile.username ?? "");
       })
+      .catch(() => {})
+      .finally(() => setProfileLoading(false));
+  }, [token]);
+
+  const loadCustodialWallet = useCallback(() => {
+    if (!token) return;
+    void apiFetch<{ wallet: any | null }>("/me/wallet", token)
+      .then((d) => setCustodialWallet(d.wallet ?? null))
       .catch(() => {});
+  }, [token]);
+
+  const loadRecentDrops = useCallback(() => {
+    if (!token) return;
+    void apiFetch<{ drops: DropRecord[] }>("/me/wallet/drops", token)
+      .then((d) => setRecentDrops(d.drops ?? []))
+      .catch(() => {});
+  }, [token]);
+
+  const loadOnchainBalances = useCallback(async () => {
+    if (!token) return;
+    setLoadingBalances(true);
+    setBalancesError("");
+    try {
+      const d = await apiFetch<{
+        ok:            boolean;
+        walletAddress?: string;
+        network?:      string;
+        balances?:     OnchainBalances;
+        status?:       string;
+        message?:      string;
+        error?:        string;
+      }>("/me/wallet/onchain-balances", token);
+
+      if (d.ok && d.balances) {
+        setOnchainBalances(d.balances);
+      } else if (d.status === "xrpl_testnet_unavailable") {
+        setBalancesError("XRPL Testnet is temporarily unavailable. Please try again later.");
+      } else {
+        setBalancesError(d.message ?? d.error ?? "Failed to load on-chain balances.");
+      }
+    } catch (err: any) {
+      setBalancesError(err.message ?? "Failed to load balances — check your connection.");
+    } finally {
+      setLoadingBalances(false);
+    }
   }, [token]);
 
   useEffect(() => {
     loadProfile();
-  }, [loadProfile]);
+    loadCustodialWallet();
+    loadRecentDrops();
+  }, [loadProfile, loadCustodialWallet, loadRecentDrops]);
+
+  const loadWalletTransactions = useCallback(async () => {
+    if (!token) return;
+    setLoadingWalletTxs(true);
+    setWalletTxMsg("");
+    try {
+      const d = await apiFetch<{
+        ok:           boolean;
+        transactions?: XrplWalletTransaction[];
+        status?:      string;
+        message?:     string;
+        error?:       string;
+      }>("/me/wallet/transactions?limit=50", token);
+
+      if (d.ok && d.transactions) {
+        setWalletTxs(d.transactions);
+      } else if (d.status === "xrpl_testnet_unavailable") {
+        setWalletTxMsg("XRPL Testnet is temporarily unavailable. Please try again later.");
+      } else {
+        setWalletTxMsg(d.message ?? d.error ?? "Failed to load transaction history.");
+      }
+    } catch (err: any) {
+      setWalletTxMsg(err.message ?? "Failed to load history — check your connection.");
+    } finally {
+      setLoadingWalletTxs(false);
+    }
+  }, [token]);
+
+  // Auto-load on-chain balances and transaction history when funded.
+  // Runs once on mount (if already funded) and again if funded_at changes.
+  useEffect(() => {
+    if (custodialWallet?.funded_at) {
+      void loadOnchainBalances();
+      void loadWalletTransactions();
+    }
+  }, [custodialWallet?.funded_at, loadOnchainBalances, loadWalletTransactions]);
+
+  const fundTestnetWallet = async () => {
+    if (!token) return;
+    setCustodialWalletMsg("");
+    setFundingWallet(true);
+    try {
+      const d = await apiFetch<{
+        ok: boolean;
+        status?: string;
+        wallet?: any;
+        error?: string;
+        message?: string;
+        txHash?: string | null;
+      }>("/me/wallet/fund-testnet", token, { method: "POST" });
+
+      if (d.ok) {
+        if (d.status === "funded") {
+          setCustodialWalletMsg("XRPL Testnet wallet funded and confirmed on-ledger.");
+          if (d.wallet) setCustodialWallet(d.wallet);
+          else loadCustodialWallet();
+        } else if (d.status === "already_funded") {
+          setCustodialWalletMsg("Wallet was already funded.");
+          if (d.wallet) setCustodialWallet(d.wallet);
+          else loadCustodialWallet();
+        } else if (d.status === "pending_confirmation") {
+          setCustodialWalletMsg(
+            d.message ??
+            "Faucet request accepted. Waiting for XRPL Testnet confirmation. Try again in a minute."
+          );
+        } else if (d.status === "disabled") {
+          setCustodialWalletMsg("Testnet funding is disabled in this environment.");
+        } else {
+          setCustodialWalletMsg(d.message ?? "Funding request sent.");
+        }
+      } else {
+        setCustodialWalletMsg(d.error ?? "Funding failed — try again later.");
+      }
+    } catch (err: any) {
+      setCustodialWalletMsg(err.message ?? "Funding request failed — check your connection.");
+    } finally {
+      setFundingWallet(false);
+    }
+  };
+
+  const setupTrustLines = async () => {
+    if (!token) return;
+    setTrustLineMsg("");
+    setSettingUpTrustLines(true);
+    try {
+      const d = await apiFetch<{
+        ok: boolean;
+        status?: string;
+        error?: string;
+        message?: string;
+        rlusdTxHash?: string;
+        eurqTxHash?: string;
+        currency?: string;
+      }>("/me/wallet/setup-trust-lines", token, { method: "POST" });
+
+      if (d.ok) {
+        if (d.status === "trust_lines_set") {
+          setTrustLineMsg("Trust lines for RLUSD (Testnet) and EURQ (Testnet) are now active.");
+          loadCustodialWallet();
+        } else if (d.status === "already_set") {
+          setTrustLineMsg("Trust lines are already established.");
+          loadCustodialWallet();
+        } else {
+          setTrustLineMsg(d.message ?? "Trust line setup completed.");
+        }
+      } else {
+        setTrustLineMsg(d.error ?? "Trust line setup failed — try again later.");
+      }
+    } catch (err: any) {
+      setTrustLineMsg(err.message ?? "Trust line setup failed — check your connection.");
+    } finally {
+      setSettingUpTrustLines(false);
+    }
+  };
+
+  const requestTestToken = async (currency: "RLUSD" | "EURQ") => {
+    if (!token) return;
+    setTokenDropMsg({ text: "" });
+    setRequestingToken(currency);
+    try {
+      const d = await apiFetch<{
+        ok: boolean;
+        status?: string;
+        currency?: string;
+        amount?: string;
+        xrplTxHash?: string;
+        explorerUrl?: string;
+        confirmedAt?: string;
+        cooldownRemainingSeconds?: number;
+        lastDropAt?: string;
+        message?: string;
+        error?: string;
+      }>("/me/wallet/request-test-token", token, {
+        method: "POST",
+        body: JSON.stringify({ currency }),
+      });
+
+      if (d.ok && d.status === "sent") {
+        const label = `${Number(d.amount).toLocaleString()} ${currency}_TEST`;
+        setTokenDropMsg({
+          text:        `Sent ${label} — transaction confirmed on XRPL Testnet.`,
+          ok:          true,
+          explorerUrl: d.explorerUrl,
+        });
+        loadRecentDrops();
+      } else if (d.status === "already_requested_recently") {
+        const secs  = d.cooldownRemainingSeconds ?? 0;
+        const hours = Math.floor(secs / 3600);
+        const mins  = Math.ceil((secs % 3600) / 60);
+        const time  = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+        setTokenDropMsg({
+          text: `Cooldown active — you can request ${currency}_TEST again in ~${time}.`,
+          ok:   false,
+        });
+      } else if (d.status === "no_trust_lines") {
+        setTokenDropMsg({ text: d.message ?? "Trust lines must be set up first.", ok: false });
+      } else if (d.status === "not_funded") {
+        setTokenDropMsg({ text: d.message ?? "Wallet must be funded first.", ok: false });
+      } else if (d.status === "xrpl_testnet_unavailable") {
+        setTokenDropMsg({
+          text: "XRPL Testnet is temporarily unavailable. Please try again in a minute.",
+          ok: false,
+        });
+      } else if (d.status === "disabled" || d.status === "config_missing") {
+        setTokenDropMsg({ text: d.message ?? "Test token drops are not available right now.", ok: false });
+      } else {
+        setTokenDropMsg({ text: d.error ?? d.message ?? "Request failed — try again later.", ok: false });
+      }
+    } catch (err: any) {
+      setTokenDropMsg({ text: err.message ?? "Request failed — check your connection.", ok: false });
+    } finally {
+      setRequestingToken(null);
+    }
+  };
+
+  const sendDryRunPayment = async () => {
+    if (!token || !dryRunDestination.startsWith("r")) return;
+    setDryRunResult(null);
+    setDryRunLoading(true);
+    try {
+      const d = await apiFetch<{
+        ok:          boolean;
+        status?:     string;
+        txHash?:     string;
+        explorerUrl?: string;
+        validatedAt?: string;
+        message?:    string;
+        error?:      string;
+      }>("/me/wallet/test-settlement", token, {
+        method: "POST",
+        body:   JSON.stringify({ destination: dryRunDestination, currency: dryRunCurrency }),
+      });
+      setDryRunResult(d);
+    } catch (err: any) {
+      setDryRunResult({ ok: false, message: err.message ?? "Request failed — check your connection." });
+    } finally {
+      setDryRunLoading(false);
+    }
+  };
 
   const saveUsername = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2013,6 +3345,9 @@ function ProfilePage() {
         <h2>Profile</h2>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>Back</button>
       </header>
+      {profileLoading ? (
+        <SkeletonLoader rows={4} widths={[100, 80, 60, 90]} />
+      ) : (
       <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <p><span className="muted">Email:</span> <strong>{profile?.email}</strong></p>
         <p><span className="muted">Full name:</span> <strong>{profile?.full_name}</strong></p>
@@ -2053,7 +3388,480 @@ function ProfilePage() {
           {profile?.id && <CopyButton text={profile.id} />}
         </p>
       </div>
+      )}
 
+      {/* ── Custodial wallet (LumixPay-managed) ─────────────────────────────── */}
+      <div className="card" style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+        <h3 style={{ margin: 0, fontSize: "1.05rem" }}>LumixPay-managed XRPL wallet</h3>
+        <p className="muted" style={{ margin: 0, fontSize: "0.82rem", lineHeight: 1.5 }}>
+          This wallet is automatically created for your account and managed by LumixPay for testnet settlement flows.
+          LumixPay stores the encrypted key on your behalf.{" "}
+          <strong>Do not send real funds to this address — this is a testnet wallet only.</strong>
+        </p>
+
+        {custodialWallet ? (
+          <>
+            <div>
+              <p className="muted" style={{ margin: "0 0 4px", fontSize: "0.78rem" }}>XRPL Testnet address</p>
+              <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <code style={{ fontSize: "0.8rem", wordBreak: "break-all" }}>
+                  {custodialWallet.classic_address}
+                </code>
+                <CopyButton text={custodialWallet.classic_address} />
+              </p>
+            </div>
+            {/* Network + status badges row */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: "0.82rem" }}>Network:</span>
+              <span className="status-badge badge-active">XRPL Testnet</span>
+              <span className="muted" style={{ fontSize: "0.82rem" }}>|</span>
+              <span className="muted" style={{ fontSize: "0.82rem" }}>Managed by LumixPay</span>
+              <span className="muted" style={{ fontSize: "0.82rem" }}>|</span>
+              {custodialWallet.funded_at ? (
+                <span className="status-badge badge-active">✓ Funded</span>
+              ) : (
+                <span className="status-badge" style={{ background: "var(--surface)", color: "var(--muted)", border: "1px solid var(--border)" }}>
+                  Pending testnet funding
+                </span>
+              )}
+              <span className="muted" style={{ fontSize: "0.82rem" }}>|</span>
+              {custodialWallet.trust_lines_set_at ? (
+                <span className="status-badge badge-active">✓ Trust lines established</span>
+              ) : (
+                <span className="status-badge" style={{ background: "var(--surface)", color: "var(--muted)", border: "1px solid var(--border)" }}>
+                  Pending trust lines
+                </span>
+              )}
+            </div>
+
+            {/* What can I do with this wallet */}
+            <div
+              style={{
+                background: "rgba(99,102,241,0.06)",
+                border: "1px solid rgba(99,102,241,0.15)",
+                borderRadius: 8,
+                padding: "12px 14px",
+                fontSize: "0.82rem",
+              }}
+            >
+              <p style={{ fontWeight: 700, marginBottom: 8, fontSize: "0.85rem" }}>What can I do with this wallet?</p>
+              <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
+                <li>✓ Receive <strong>RLUSD_TEST</strong> on XRPL Testnet</li>
+                <li>✓ Receive <strong>EURQ_TEST</strong> on XRPL Testnet</li>
+                <li>✓ Receive <strong>XRPL Testnet XRP</strong> (for testing reserves)</li>
+                <li>✓ <strong>Test withdrawals</strong> from your LumixPay balance to this wallet</li>
+              </ul>
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: "7px 10px",
+                  background: "rgba(220,38,38,0.08)",
+                  border: "1px solid rgba(220,38,38,0.2)",
+                  borderRadius: 6,
+                  color: "var(--danger, #dc2626)",
+                  fontSize: "0.78rem",
+                  fontWeight: 600,
+                }}
+              >
+                ⚠ Do not send real XRPL Mainnet assets to this address. This is a Testnet-only wallet.
+              </div>
+            </div>
+
+            {/* Funding section */}
+            {custodialWallet.funded_at ? (
+              <p className="muted" style={{ margin: 0, fontSize: "0.78rem" }}>
+                Confirmed on-ledger: {new Date(custodialWallet.funded_at).toLocaleString()}
+              </p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => void fundTestnetWallet()}
+                  disabled={fundingWallet}
+                  style={{ alignSelf: "flex-start" }}
+                >
+                  {fundingWallet ? "Verifying on XRPL Testnet…" : "Fund testnet wallet"}
+                </button>
+                <p className="muted" style={{ margin: 0, fontSize: "0.78rem" }}>
+                  Requests 100 test XRP and waits up to 30 s for on-ledger confirmation. Test XRP has no real value.
+                </p>
+              </div>
+            )}
+            {custodialWalletMsg && (
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "0.82rem",
+                  color: custodialWalletMsg.toLowerCase().includes("fail") ||
+                         custodialWalletMsg.toLowerCase().includes("error")
+                    ? "var(--error, #e53e3e)"
+                    : custodialWalletMsg.toLowerCase().includes("waiting") ||
+                      custodialWalletMsg.toLowerCase().includes("pending") ||
+                      custodialWalletMsg.toLowerCase().includes("accepted")
+                    ? "var(--warning, #d69e2e)"
+                    : "var(--muted)",
+                }}
+              >
+                {custodialWalletMsg}
+              </p>
+            )}
+
+            {/* ── On-chain balances (Phase 2D) — shown when wallet is funded ── */}
+            {custodialWallet.funded_at && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                  <div>
+                    <p style={{ margin: "0 0 2px", fontWeight: 600, fontSize: "0.9rem" }}>XRPL Testnet wallet balance</p>
+                    <p className="muted" style={{ margin: 0, fontSize: "0.73rem" }}>
+                      This is separate from your internal LumixPay balance.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void loadOnchainBalances()}
+                    disabled={loadingBalances}
+                    style={{ fontSize: "0.76rem", padding: "3px 10px" }}
+                  >
+                    {loadingBalances ? "Loading…" : "Refresh balances"}
+                  </button>
+                </div>
+                <p className="muted" style={{ margin: 0, fontSize: "0.74rem", lineHeight: 1.5 }}>
+                  Balances are read directly from XRPL Testnet. Use{" "}
+                  <Link to="/withdraw" style={{ color: "var(--accent)", textDecoration: "none" }}>Withdraw</Link>{" "}
+                  to move your internal LumixPay balance here.
+                </p>
+
+                {balancesError && (
+                  <p
+                    style={{
+                      margin: 0,
+                      fontSize: "0.78rem",
+                      color: balancesError.includes("unavailable")
+                        ? "var(--warning, #d69e2e)"
+                        : "var(--error, #e53e3e)",
+                    }}
+                  >
+                    {balancesError}
+                  </p>
+                )}
+
+                {onchainBalances ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: "0.82rem" }}>
+                    <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                      <span className="muted" style={{ minWidth: 130, flexShrink: 0 }}>XRP (Testnet):</span>
+                      <span>
+                        <strong>{Number(onchainBalances.xrpBalance).toFixed(2)}</strong>
+                        <span className="muted" style={{ fontSize: "0.72rem", marginLeft: 8 }}>
+                          {Number(onchainBalances.reserveBalance).toFixed(2)} reserved
+                          {" · "}
+                          {Number(onchainBalances.availableXrpBalance).toFixed(2)} available
+                        </span>
+                      </span>
+                    </div>
+                    {onchainBalances.issuedBalances.map((b) => (
+                      <div key={b.currency} style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                        <span className="muted" style={{ minWidth: 130, flexShrink: 0 }}>{b.label}:</span>
+                        <strong>{Number(b.balance).toFixed(2)}</strong>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  !loadingBalances && !balancesError && (
+                    <p className="muted" style={{ margin: 0, fontSize: "0.76rem" }}>
+                      Click "Refresh balances" to load your current XRPL Testnet balances.
+                    </p>
+                  )
+                )}
+              </div>
+            )}
+
+            {/* Trust line setup section */}
+            {custodialWallet.funded_at && !custodialWallet.trust_lines_set_at && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+                <button
+                  type="button"
+                  onClick={() => void setupTrustLines()}
+                  disabled={settingUpTrustLines}
+                  style={{ alignSelf: "flex-start" }}
+                >
+                  {settingUpTrustLines ? "Setting up trust lines…" : "Setup test token trust lines"}
+                </button>
+                <p className="muted" style={{ margin: 0, fontSize: "0.78rem" }}>
+                  Sets up testnet trust lines for{" "}
+                  <strong>RLUSD_TEST</strong> and <strong>EURQ_TEST</strong>.
+                  These are test tokens with no real value.
+                </p>
+              </div>
+            )}
+            {custodialWallet.trust_lines_set_at && (
+              <p className="muted" style={{ margin: 0, fontSize: "0.78rem" }}>
+                Trust lines active since: {new Date(custodialWallet.trust_lines_set_at).toLocaleString()}
+                {" — "}
+                <strong>RLUSD (Testnet)</strong> and <strong>EURQ (Testnet)</strong> ready.
+              </p>
+            )}
+            {trustLineMsg && (
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "0.82rem",
+                  color: trustLineMsg.toLowerCase().includes("fail") ||
+                         trustLineMsg.toLowerCase().includes("error")
+                    ? "var(--error, #e53e3e)"
+                    : trustLineMsg.toLowerCase().includes("active") ||
+                      trustLineMsg.toLowerCase().includes("established")
+                    ? "var(--success, #276749)"
+                    : "var(--muted)",
+                }}
+              >
+                {trustLineMsg}
+              </p>
+            )}
+
+            {/* ── XRPL Transaction History (Phase 3B) — shown when wallet is funded ── */}
+            {custodialWallet.funded_at && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                  <p style={{ margin: 0, fontWeight: 600, fontSize: "0.9rem" }}>XRPL Transaction History</p>
+                  <button
+                    type="button"
+                    onClick={() => void loadWalletTransactions()}
+                    disabled={loadingWalletTxs}
+                    style={{ fontSize: "0.76rem", padding: "3px 10px" }}
+                  >
+                    {loadingWalletTxs ? "Loading…" : "Refresh history"}
+                  </button>
+                </div>
+                <p className="muted" style={{ margin: 0, fontSize: "0.74rem", lineHeight: 1.5 }}>
+                  These transactions are read directly from XRPL Testnet and are separate from your internal LumixPay app history.{" "}
+                  <strong>On-chain only.</strong> Internal LumixPay transfers are shown separately in History.
+                </p>
+
+                {walletTxMsg && (
+                  <p
+                    style={{
+                      margin: 0,
+                      fontSize: "0.78rem",
+                      color: walletTxMsg.includes("unavailable")
+                        ? "var(--warning, #d69e2e)"
+                        : "var(--error, #e53e3e)",
+                    }}
+                  >
+                    {walletTxMsg}
+                  </p>
+                )}
+
+                {!loadingWalletTxs && !walletTxMsg && walletTxs.length === 0 && (
+                  <p className="muted" style={{ margin: 0, fontSize: "0.78rem" }}>
+                    No XRPL transactions found.
+                  </p>
+                )}
+
+                {walletTxs.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                    {walletTxs.map((tx) => {
+                      const isIn     = tx.direction === "IN";
+                      const isOut    = tx.direction === "OUT";
+                      const isSys    = tx.direction === "SYSTEM";
+                      const dirColor = isIn
+                        ? "var(--success, #276749)"
+                        : isOut
+                        ? "var(--error, #e53e3e)"
+                        : "var(--muted)";
+                      const dirLabel = isIn ? "↙ Received" : isOut ? "↗ Sent" : "⚙ Trust Line";
+                      const shortCp  = tx.counterparty.length > 14
+                        ? `${tx.counterparty.slice(0, 7)}…${tx.counterparty.slice(-4)}`
+                        : tx.counterparty;
+                      const dateStr  = tx.timestamp
+                        ? new Date(tx.timestamp).toLocaleString(undefined, {
+                            month: "short", day: "numeric",
+                            hour: "2-digit", minute: "2-digit",
+                          })
+                        : "–";
+
+                      return (
+                        <div
+                          key={tx.hash}
+                          style={{
+                            display:       "grid",
+                            gridTemplateColumns: "auto 1fr auto",
+                            columnGap:     10,
+                            rowGap:        2,
+                            padding:       "7px 10px",
+                            borderRadius:  5,
+                            background:    "var(--surface)",
+                            border:        "1px solid var(--border)",
+                            fontSize:      "0.77rem",
+                          }}
+                        >
+                          {/* Row 1: direction | asset + amount | status + explorer */}
+                          <span style={{ color: dirColor, fontWeight: 600, whiteSpace: "nowrap" }}>
+                            {dirLabel}
+                          </span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {tx.amount !== "-" && (
+                              <strong style={{ marginRight: 4 }}>{tx.amount}</strong>
+                            )}
+                            <span className="muted">
+                              {isSys && tx.trustLineCurrency
+                                ? tx.trustLineCurrency
+                                : tx.currency}
+                            </span>
+                          </span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
+                            <span
+                              className={`status-badge ${tx.status === "confirmed" ? "badge-active" : "badge-suspended"}`}
+                              style={{ fontSize: "0.65rem", padding: "1px 5px" }}
+                            >
+                              {tx.status}
+                            </span>
+                            <a
+                              href={tx.explorerUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ fontSize: "0.73rem", whiteSpace: "nowrap" }}
+                            >
+                              View ↗
+                            </a>
+                          </span>
+
+                          {/* Row 2: date | counterparty */}
+                          <span className="muted" style={{ fontSize: "0.71rem" }}>{dateStr}</span>
+                          <span
+                            className="muted"
+                            title={tx.counterparty}
+                            style={{ fontSize: "0.71rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          >
+                            {shortCp}
+                          </span>
+                          <span /> {/* grid placeholder */}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Test token drops (Phase 2C) — only shown when trust lines ready ── */}
+            {custodialWallet.trust_lines_set_at && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+                <p style={{ margin: 0, fontWeight: 600, fontSize: "0.9rem" }}>Test Token Drops</p>
+                <p className="muted" style={{ margin: 0, fontSize: "0.78rem", lineHeight: 1.5 }}>
+                  Request test issued tokens from the LumixPay testnet issuer.{" "}
+                  <strong>These tokens have no real value</strong> and are for testnet use only.
+                </p>
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => void requestTestToken("RLUSD")}
+                    disabled={requestingToken !== null}
+                    style={{ alignSelf: "flex-start" }}
+                  >
+                    {requestingToken === "RLUSD" ? "Requesting…" : "Request RLUSD_TEST"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void requestTestToken("EURQ")}
+                    disabled={requestingToken !== null}
+                    style={{ alignSelf: "flex-start" }}
+                  >
+                    {requestingToken === "EURQ" ? "Requesting…" : "Request EURQ_TEST"}
+                  </button>
+                </div>
+
+                {tokenDropMsg.text && (
+                  <div style={{ fontSize: "0.82rem", lineHeight: 1.5 }}>
+                    <p
+                      style={{
+                        margin: 0,
+                        color: tokenDropMsg.ok === false
+                          ? "var(--error, #e53e3e)"
+                          : tokenDropMsg.ok === true
+                          ? "var(--success, #276749)"
+                          : "var(--muted)",
+                      }}
+                    >
+                      {tokenDropMsg.text}
+                    </p>
+                    {tokenDropMsg.explorerUrl && (
+                      <a
+                        href={tokenDropMsg.explorerUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ fontSize: "0.78rem" }}
+                      >
+                        View on XRPL Testnet Explorer ↗
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {recentDrops.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <p className="muted" style={{ margin: 0, fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                      Recent drops
+                    </p>
+                    {recentDrops.map((drop) => (
+                      <div
+                        key={drop.id}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          fontSize: "0.78rem",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <span
+                          className={
+                            drop.status === "confirmed"
+                              ? "status-badge badge-active"
+                              : drop.status === "failed"
+                              ? "status-badge badge-suspended"
+                              : "status-badge"
+                          }
+                          style={{ fontSize: "0.68rem", padding: "1px 6px" }}
+                        >
+                          {drop.status}
+                        </span>
+                        <span>
+                          {Number(drop.amount_decimal).toLocaleString()} {drop.currency}_TEST
+                        </span>
+                        <span className="muted">
+                          {new Date(drop.requested_at).toLocaleDateString()}
+                        </span>
+                        {drop.explorerUrl && drop.status === "confirmed" && (
+                          <a
+                            href={drop.explorerUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ fontSize: "0.75rem" }}
+                          >
+                            Explorer ↗
+                          </a>
+                        )}
+                        {drop.status === "failed" && drop.error_message && (
+                          <span className="muted" style={{ fontSize: "0.72rem" }} title={drop.error_message}>
+                            (failed)
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
+            No managed wallet found. If you registered recently your wallet may still be provisioning, or it was skipped in the current configuration.
+          </p>
+        )}
+      </div>
+
+      {/* ── BYOW wallet (user-controlled, optional) ──────────────────────── */}
       <div className="card" style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 12 }}>
         <h3 style={{ margin: 0, fontSize: "1.05rem" }}>XRPL wallet (optional)</h3>
         <p className="muted" style={{ margin: 0, fontSize: "0.88rem", lineHeight: 1.5 }}>
@@ -2140,6 +3948,128 @@ function ProfilePage() {
           <p className="error" style={{ margin: 0 }}>{walletMsg}</p>
         ) : null}
       </div>
+
+      {/* ── Developer: XRPL Settlement Dry Run (admin only — testnet) ─── */}
+      {profile?.role === "admin" && (
+      <div
+        className="card"
+        style={{
+          marginTop: 20,
+          display:   "flex",
+          flexDirection: "column",
+          gap: 12,
+          borderTop: "3px solid var(--warning, #d69e2e)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0, fontSize: "1.05rem" }}>Developer: XRPL Settlement Dry Run</h3>
+          <span
+            className="status-badge"
+            style={{ fontSize: "0.68rem", background: "var(--warning, #d69e2e)", color: "#1a1a1a" }}
+          >
+            TESTNET ONLY
+          </span>
+        </div>
+        <p className="muted" style={{ margin: 0, fontSize: "0.82rem", lineHeight: 1.55 }}>
+          Sends exactly <strong>1 token</strong> from your LumixPay-managed custodial wallet to
+          another XRPL Testnet address. Requires a funded wallet, established trust lines, and
+          tokens received via a test drop.{" "}
+          <strong>Does not affect your internal LumixPay balance.</strong>
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div>
+            <label className="muted" style={{ fontSize: "0.78rem" }}>Destination XRPL address</label>
+            <input
+              placeholder="r... (25–35 chars, XRPL Testnet)"
+              value={dryRunDestination}
+              onChange={(e) => {
+                setDryRunDestination(e.target.value.trim());
+                setDryRunResult(null);
+              }}
+              autoComplete="off"
+              style={{ width: "100%", marginTop: 4, fontFamily: "monospace", fontSize: "0.82rem" }}
+            />
+          </div>
+          <div>
+            <label className="muted" style={{ fontSize: "0.78rem" }}>Token</label>
+            <select
+              value={dryRunCurrency}
+              onChange={(e) => {
+                setDryRunCurrency(e.target.value as "RLUSD" | "EURQ");
+                setDryRunResult(null);
+              }}
+              style={{ width: "100%", marginTop: 4 }}
+            >
+              <option value="RLUSD">RLUSD_TEST</option>
+              <option value="EURQ">EURQ_TEST</option>
+            </select>
+          </div>
+          <button
+            type="button"
+            onClick={() => void sendDryRunPayment()}
+            disabled={dryRunLoading || dryRunDestination.length < 25 || !dryRunDestination.startsWith("r")}
+            style={{ alignSelf: "flex-start" }}
+          >
+            {dryRunLoading ? "Submitting to XRPL Testnet…" : `Send 1 ${dryRunCurrency}_TEST`}
+          </button>
+        </div>
+
+        {dryRunResult && (
+          <div
+            style={{
+              display:       "flex",
+              flexDirection: "column",
+              gap:           8,
+              padding:       "10px 12px",
+              borderRadius:  6,
+              background:    dryRunResult.ok ? "var(--success-bg, #f0fff4)" : "var(--error-bg, #fff5f5)",
+              border:        `1px solid ${dryRunResult.ok ? "var(--success, #276749)" : "var(--error, #e53e3e)"}`,
+              fontSize:      "0.82rem",
+            }}
+          >
+            {dryRunResult.ok ? (
+              <>
+                <p style={{ margin: 0, fontWeight: 600, color: "var(--success, #276749)" }}>
+                  Payment confirmed on XRPL Testnet ✓
+                </p>
+                <p style={{ margin: 0 }}>
+                  <span className="muted">TX Hash: </span>
+                  <code style={{ fontSize: "0.74rem", wordBreak: "break-all" }}>{dryRunResult.txHash}</code>
+                </p>
+                {dryRunResult.validatedAt && (
+                  <p style={{ margin: 0 }}>
+                    <span className="muted">Validated: </span>
+                    {new Date(dryRunResult.validatedAt).toLocaleString()}
+                  </p>
+                )}
+                {dryRunResult.explorerUrl && (
+                  <a
+                    href={dryRunResult.explorerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ fontSize: "0.8rem" }}
+                  >
+                    View transaction on XRPL Testnet Explorer ↗
+                  </a>
+                )}
+              </>
+            ) : (
+              <p
+                style={{
+                  margin: 0,
+                  color: dryRunResult.status === "xrpl_testnet_unavailable"
+                    ? "var(--warning, #d69e2e)"
+                    : "var(--error, #e53e3e)",
+                }}
+              >
+                {dryRunResult.message ?? dryRunResult.error ?? "Request failed."}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+      )}
     </div>
   );
 }
@@ -2195,7 +4125,16 @@ function ContactsPage() {
           {msg && <p className={msg.includes("✅") ? "muted" : "error"}>{msg}</p>}
         </form>
       </div>
-      {contacts.length === 0 && <p className="muted">No contacts yet.</p>}
+      {contacts.length === 0 && (
+        <div className="card" style={{ textAlign: "center", padding: 28 }}>
+          <p style={{ fontSize: "1.6rem", marginBottom: 8 }}>👥</p>
+          <p style={{ fontWeight: 600, marginBottom: 6 }}>No contacts yet</p>
+          <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 12 }}>Add a contact by email or @username to send funds quickly.</p>
+          <Link to="/transfer" style={{ fontSize: "0.82rem", color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+            Go to Send →
+          </Link>
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {contacts.map((c) => (
           <div key={c.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -3423,10 +5362,13 @@ function ExchangePage() {
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
           <h2 style={{ marginBottom: 2 }}>Currency Exchange</h2>
-          <p className="muted" style={{ fontSize: "0.78rem" }}>Convert between RLUSD and EURQ at current rates</p>
+          <p className="muted" style={{ fontSize: "0.78rem" }}>Convert between RLUSD_TEST and EURQ_TEST at demo rates</p>
         </div>
         <button onClick={() => navigate("/dashboard")} style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>Back</button>
       </header>
+      <p className="inline-help" style={{ marginBottom: 16 }}>
+        Internal ledger exchange only — this does not move tokens on XRPL Testnet.
+      </p>
 
       {errorMsg && <FeedbackBanner type="error" message={errorMsg} />}
 
@@ -3734,6 +5676,96 @@ function AdminDevelopersPage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ── XRPL Treasury data types ──────────────────────────────────────────────────
+
+interface XrplTreasuryWallet {
+  address:         string;
+  accountExists:   boolean;
+  xrpBalance:      string | null;
+  ownerCount:      number | null;
+  totalIssuedRLUSD: string | null;
+  totalIssuedEURQ:  string | null;
+}
+
+interface XrplSettlementStats {
+  pendingWithdrawals:    number;
+  approvedWithdrawals:   number;
+  settledWithdrawals:    number;
+  rejectedWithdrawals:   number;
+  stuckWithdrawals:      number;
+  totalSettledRLUSD:     string;
+  totalSettledEURQ:      string;
+  totalFeesRLUSD:        string;
+  totalFeesEURQ:         string;
+  totalNetworkFeesXRP:   string;
+  lastSettlementAt:      string | null;
+}
+
+interface XrplSettlement {
+  id:                  string;
+  userEmail:           string;
+  currencyCode:        string;
+  grossAmount:         string;
+  netAmount:           string;
+  feeAmount:           string;
+  status:              string;
+  destinationAddress:  string;
+  xrplTxHash:          string | null;
+  xrplConfirmedAt:     string | null;
+  xrplNetworkFeeXrp:   string | null;
+  explorerUrl:         string | null;
+}
+
+interface XrplTreasuryHealth {
+  status:            "healthy" | "warning" | "critical";
+  message:           string;
+  xrpBalance:        string;
+  thresholdWarning:  string;
+  thresholdCritical: string;
+}
+
+interface XrplSettlementMetrics {
+  totalSettlements:              number;
+  successfulSettlements:         number;
+  failedSettlements:             number;
+  settlementSuccessRate:         string;
+  averageConfirmationSeconds:    string | null;
+  totalSettledRLUSD:             string;
+  totalSettledEURQ:              string;
+  totalSettlementVolume:         string;
+  totalNetworkFeesXRP:           string;
+  lastSuccessfulSettlementAt:    string | null;
+  lastFailedSettlementAt:        string | null;
+}
+
+interface XrplQueueMetrics {
+  workerEnabled:          boolean;
+  queued:                 number;
+  processing:             number;
+  lastRunAt:              string | null;
+  nextRunAt:              string | null;
+  lastSuccessfulQueueRun: string | null;
+  lastFailedQueueRun:     string | null;
+}
+
+interface XrplTreasuryData {
+  network:            "xrpl_testnet";
+  treasury:           XrplTreasuryWallet;
+  health:             XrplTreasuryHealth;
+  metrics:            XrplSettlementMetrics;
+  queueMetrics:       XrplQueueMetrics;
+  settlementStats:    XrplSettlementStats;
+  recentSettlements:  XrplSettlement[];
+}
+
+interface QueueStatus {
+  workerEnabled: boolean;
+  queued:        number;
+  processing:    number;
+  lastRunAt:     string | null;
+  nextRunAt:     string | null;
+}
+
 // Admin Treasury page  /admin/treasury
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3744,6 +5776,14 @@ function AdminTreasuryPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ max_supply: "", current_supply: "" });
   const [msg, setMsg] = useState("");
+
+  // ── XRPL Testnet treasury section ────────────────────────────────────────
+  const [xrplData, setXrplData] = useState<XrplTreasuryData | null>(null);
+  const [xrplLoading, setXrplLoading] = useState(false);
+  const [xrplMsg, setXrplMsg] = useState("");
+  const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
+  const [queueRunning, setQueueRunning] = useState(false);
+  const [queueRunMsg, setQueueRunMsg] = useState("");
 
   // ── Revenue analytics ────────────────────────────────────────────────────
   const [revPeriod, setRevPeriod] = useState<"today"|"7d"|"30d"|"all">("30d");
@@ -3763,7 +5803,50 @@ function AdminTreasuryPage() {
       .then((d) => setLimits(d.limits ?? []))
       .catch(() => {});
 
-  useEffect(() => { void load(); void loadRevenue(revPeriod); }, [token]);
+  const loadXrplTreasury = useCallback(async () => {
+    setXrplLoading(true);
+    setXrplMsg("");
+    try {
+      const [d, q] = await Promise.allSettled([
+        apiFetch<{ ok: boolean } & XrplTreasuryData>("/admin/treasury/xrpl-testnet", token),
+        apiFetch<{ ok: boolean } & QueueStatus>("/admin/treasury/xrpl-testnet/queue", token),
+      ]);
+
+      if (d.status === "fulfilled" && d.value.ok) {
+        setXrplData(d.value as unknown as XrplTreasuryData);
+      } else if (d.status === "rejected") {
+        const body = (d.reason as any)?.responseBody ?? {};
+        setXrplMsg(body.message ?? (d.reason as any)?.message ?? "XRPL Testnet unavailable.");
+      } else {
+        setXrplMsg((d.value as any).message ?? "Failed to load XRPL treasury data.");
+      }
+
+      if (q.status === "fulfilled" && q.value.ok) {
+        setQueueStatus(q.value as unknown as QueueStatus);
+      }
+    } finally {
+      setXrplLoading(false);
+    }
+  }, [token]);
+
+  const triggerQueue = async () => {
+    setQueueRunning(true);
+    setQueueRunMsg("");
+    try {
+      const d = await apiFetch<{ ok: boolean; message: string; queued: number }>(
+        "/admin/treasury/xrpl-testnet/queue/run", token, { method: "POST" }
+      );
+      setQueueRunMsg(d.message ?? "Queue cycle triggered.");
+      // Refresh queue status after a short delay so the UI updates
+      setTimeout(() => { void loadXrplTreasury(); }, 3_000);
+    } catch (e: any) {
+      setQueueRunMsg(e.message ?? "Failed to trigger queue.");
+    } finally {
+      setQueueRunning(false);
+    }
+  };
+
+  useEffect(() => { void load(); void loadRevenue(revPeriod); void loadXrplTreasury(); }, [token]);
   useEffect(() => { void loadRevenue(revPeriod); }, [revPeriod]);
 
   const save = async (assetId: string) => {
@@ -3793,6 +5876,68 @@ function AdminTreasuryPage() {
       <p className="muted" style={{ marginBottom: 16 }}>
         Manage token inventory per asset. <strong>Available Inventory</strong> decreases on every topup or admin-voucher redemption. Admin restocks by editing the value directly.
       </p>
+
+      {/* ── Demo Summary panel ────────────────────────────────────────────── */}
+      <div
+        className="card"
+        style={{
+          marginBottom: 24,
+          background: "linear-gradient(135deg,rgba(99,102,241,0.08) 0%,rgba(16,185,129,0.06) 100%)",
+          border: "1px solid rgba(99,102,241,0.2)",
+        }}
+      >
+        <h3 style={{ fontSize: "1rem", marginBottom: 14 }}>🎯 Demo Summary — XRPL Testnet</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10 }}>
+          {[
+            {
+              label: "Settled Withdrawals",
+              value: xrplData?.stats.settledWithdrawals ?? "…",
+              sub: "on-chain settlements",
+              icon: "✅",
+            },
+            {
+              label: "Pending Approval",
+              value: xrplData?.stats.pendingWithdrawals ?? "…",
+              sub: "awaiting processing",
+              icon: "⏳",
+            },
+            {
+              label: "Approved (queue)",
+              value: xrplData?.stats.approvedWithdrawals ?? "…",
+              sub: "in settlement queue",
+              icon: "⚡",
+            },
+            {
+              label: "Total Volume",
+              value: xrplData?.stats.totalVolumeSettled
+                ? formatMoney(xrplData.stats.totalVolumeSettled)
+                : "…",
+              sub: "RLUSD_TEST + EURQ_TEST",
+              icon: "💹",
+            },
+            {
+              label: "Platform Revenue",
+              value: revenue ? formatMoney(revenue.totalRevenue) : "…",
+              sub: `last ${revPeriod}`,
+              icon: "🏦",
+            },
+          ].map(({ label, value, sub, icon }) => (
+            <div
+              key={label}
+              style={{ background: "var(--bg)", borderRadius: 10, padding: "12px 14px" }}
+            >
+              <p className="muted" style={{ fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                {icon} {label}
+              </p>
+              <p style={{ fontWeight: 700, fontSize: "1.3rem", margin: "0 0 3px" }}>{value}</p>
+              <p className="muted" style={{ fontSize: "0.68rem" }}>{sub}</p>
+            </div>
+          ))}
+        </div>
+        <p className="muted" style={{ fontSize: "0.72rem", marginTop: 12, marginBottom: 0 }}>
+          All activity is on <strong>XRPL Testnet</strong>. No real funds are involved.
+        </p>
+      </div>
 
       {/* ── Revenue Dashboard ─────────────────────────────────────────────── */}
       <div className="card" style={{ marginBottom: 24 }}>
@@ -3849,6 +5994,372 @@ function AdminTreasuryPage() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* ── XRPL Testnet Settlement Section ──────────────────────────────── */}
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <h3 style={{ fontSize: "1rem", margin: 0 }}>⛓ XRPL Testnet Settlement</h3>
+            <p className="muted" style={{ fontSize: "0.72rem", marginTop: 3, marginBottom: 0 }}>
+              This treasury dashboard monitors XRPL Testnet settlement activity. It does not represent real funds.
+            </p>
+          </div>
+          <button
+            onClick={() => void loadXrplTreasury()}
+            disabled={xrplLoading}
+            style={{ fontSize: "0.82rem", background: "var(--surface)", border: "1px solid var(--border)", minWidth: 90 }}
+          >
+            {xrplLoading ? "Loading…" : "⟳ Refresh"}
+          </button>
+        </div>
+
+        {xrplMsg && (
+          <p style={{ marginTop: 10, marginBottom: 0, padding: "8px 10px", background: "rgba(220,38,38,0.07)", borderRadius: 7, border: "1px solid rgba(220,38,38,0.2)", fontSize: "0.83rem", color: "var(--danger,#dc2626)" }}>
+            {xrplMsg}
+          </p>
+        )}
+
+        {!xrplData && !xrplLoading && !xrplMsg && (
+          <p className="muted" style={{ marginTop: 12, fontSize: "0.83rem" }}>Click Refresh to load XRPL Testnet treasury data.</p>
+        )}
+
+        {xrplData && (() => {
+          const { treasury: tw, settlementStats: ss, recentSettlements: rs } = xrplData;
+          const shortAddr = (a: string) => a.length > 14 ? `${a.slice(0, 8)}…${a.slice(-6)}` : a;
+
+          return (
+            <>
+              {/* ── Treasury wallet card ────────────────────────────────── */}
+              <div style={{ marginTop: 14, padding: "14px 16px", background: "var(--bg)", borderRadius: 10, border: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                  <div>
+                    <p className="muted" style={{ fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                      Treasury / Issuer Wallet
+                    </p>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <code style={{ fontSize: "0.80rem", wordBreak: "break-all" }}>{tw.address}</code>
+                      <a
+                        href={`https://testnet.xrpl.org/accounts/${tw.address}`}
+                        target="_blank" rel="noreferrer"
+                        style={{ fontSize: "0.75rem", whiteSpace: "nowrap" }}
+                      >Explorer ↗</a>
+                    </div>
+                    <p className="muted" style={{ fontSize: "0.70rem", marginTop: 4 }}>
+                      Network: XRPL Testnet
+                    </p>
+                  </div>
+                  <span style={{
+                    fontSize: "0.72rem", padding: "3px 10px", borderRadius: 20,
+                    background: tw.accountExists ? "rgba(22,163,74,0.12)" : "rgba(220,38,38,0.10)",
+                    border: `1px solid ${tw.accountExists ? "rgba(22,163,74,0.3)" : "rgba(220,38,38,0.3)"}`,
+                    color: tw.accountExists ? "var(--success,#16a34a)" : "var(--danger,#dc2626)",
+                    fontWeight: 600,
+                  }}>
+                    {tw.accountExists ? "● Funded" : "○ Not found"}
+                  </span>
+                </div>
+
+                {tw.accountExists && (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, marginTop: 14 }}>
+                    <div>
+                      <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>XRP Balance</p>
+                      <p style={{ fontWeight: 700, fontSize: "1.1rem" }}>{tw.xrpBalance ?? "—"} XRP</p>
+                    </div>
+                    <div>
+                      <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>Owner Count</p>
+                      <p style={{ fontWeight: 700, fontSize: "1.1rem" }}>{tw.ownerCount ?? "—"}</p>
+                      <p className="muted" style={{ fontSize: "0.63rem" }}>~{((tw.ownerCount ?? 0) * 2)} XRP reserved</p>
+                    </div>
+                    <div>
+                      <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>RLUSD_TEST Issued</p>
+                      <p style={{ fontWeight: 700, fontSize: "1.1rem" }}>
+                        {tw.totalIssuedRLUSD != null ? tw.totalIssuedRLUSD : <span className="muted">—</span>}
+                      </p>
+                      <p className="muted" style={{ fontSize: "0.63rem" }}>Outstanding obligations (Testnet)</p>
+                    </div>
+                    <div>
+                      <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>EURQ_TEST Issued</p>
+                      <p style={{ fontWeight: 700, fontSize: "1.1rem" }}>
+                        {tw.totalIssuedEURQ != null ? tw.totalIssuedEURQ : <span className="muted">—</span>}
+                      </p>
+                      <p className="muted" style={{ fontSize: "0.63rem" }}>Outstanding obligations (Testnet)</p>
+                    </div>
+                  </div>
+                )}
+                {!tw.accountExists && (
+                  <p style={{ marginTop: 10, marginBottom: 0, fontSize: "0.83rem", color: "var(--warning,#d97706)" }}>
+                    ⚠ Treasury wallet is not funded on XRPL Testnet. Settlement cannot proceed.
+                  </p>
+                )}
+              </div>
+
+              {/* ── Section A: Treasury Health ──────────────────────────── */}
+              {xrplData.health && (() => {
+                const h = xrplData.health;
+                const colour =
+                  h.status === "healthy"  ? { bg: "rgba(22,163,74,0.09)",  border: "rgba(22,163,74,0.28)",  text: "var(--success,#16a34a)" } :
+                  h.status === "warning"  ? { bg: "rgba(217,119,6,0.09)",  border: "rgba(217,119,6,0.28)",  text: "var(--warning,#d97706)" } :
+                                           { bg: "rgba(220,38,38,0.09)",   border: "rgba(220,38,38,0.28)",  text: "var(--danger,#dc2626)" };
+                const icon = h.status === "healthy" ? "🟢" : h.status === "warning" ? "🟡" : "🔴";
+                return (
+                  <div style={{ marginTop: 14, padding: "12px 16px", background: colour.bg, border: `1px solid ${colour.border}`, borderRadius: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                      <div>
+                        <p className="muted" style={{ fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Treasury Health</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.05rem", color: colour.text, marginBottom: 4 }}>
+                          {icon} {h.status.charAt(0).toUpperCase() + h.status.slice(1)}
+                        </p>
+                        <p style={{ fontSize: "0.83rem", margin: 0 }}>{h.message}</p>
+                      </div>
+                      <div style={{ textAlign: "right", fontSize: "0.72rem" }}>
+                        <p className="muted" style={{ margin: "0 0 2px 0" }}>⚠ Warning below {h.thresholdWarning} XRP</p>
+                        <p className="muted" style={{ margin: 0 }}>🔴 Critical below {h.thresholdCritical} XRP</p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* ── Section B: Settlement Performance ──────────────────── */}
+              {xrplData.metrics && (() => {
+                const m = xrplData.metrics;
+                const rate = parseFloat(m.settlementSuccessRate);
+                const rateColour =
+                  rate >= 90 ? "var(--success,#16a34a)" :
+                  rate >= 70 ? "var(--warning,#d97706)" :
+                               "var(--danger,#dc2626)";
+                return (
+                  <div style={{ marginTop: 14 }}>
+                    <p className="muted" style={{ fontSize: "0.72rem", marginBottom: 8 }}>Settlement Performance</p>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(135px,1fr))", gap: 10 }}>
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Success Rate</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.3rem", color: rateColour }}>{m.settlementSuccessRate}%</p>
+                        <p className="muted" style={{ fontSize: "0.63rem", marginTop: 2 }}>{m.successfulSettlements} of {m.totalSettlements}</p>
+                      </div>
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Avg Confirmation</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.3rem" }}>
+                          {m.averageConfirmationSeconds != null ? `${m.averageConfirmationSeconds}s` : "—"}
+                        </p>
+                        <p className="muted" style={{ fontSize: "0.63rem", marginTop: 2 }}>per settlement</p>
+                      </div>
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Total Settlements</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.3rem" }}>{m.totalSettlements}</p>
+                        <p className="muted" style={{ fontSize: "0.63rem", marginTop: 2 }}>{m.failedSettlements} failed</p>
+                      </div>
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Total Volume</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.1rem" }}>{m.totalSettlementVolume}</p>
+                        <p className="muted" style={{ fontSize: "0.63rem", marginTop: 2 }}>RLUSD_TEST + EURQ_TEST</p>
+                      </div>
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Network Fees</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.1rem" }}>{m.totalNetworkFeesXRP}</p>
+                        <p className="muted" style={{ fontSize: "0.63rem", marginTop: 2 }}>XRP consumed</p>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
+                      {m.lastSuccessfulSettlementAt && (
+                        <p className="muted" style={{ fontSize: "0.70rem", margin: 0 }}>
+                          ✓ Last success: {new Date(m.lastSuccessfulSettlementAt).toLocaleString()}
+                        </p>
+                      )}
+                      {m.lastFailedSettlementAt && (
+                        <p className="muted" style={{ fontSize: "0.70rem", margin: 0 }}>
+                          ✗ Last failure: {new Date(m.lastFailedSettlementAt).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* ── Settlement stats ────────────────────────────────────── */}
+              <div style={{ marginTop: 14 }}>
+                <p className="muted" style={{ fontSize: "0.72rem", marginBottom: 8 }}>Settlement Statistics</p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(115px,1fr))", gap: 10 }}>
+                  {[
+                    { label: "Pending",  value: ss.pendingWithdrawals,   color: undefined },
+                    { label: "Approved", value: ss.approvedWithdrawals,  color: "var(--warning,#d97706)" },
+                    { label: "Settled",  value: ss.settledWithdrawals,   color: "var(--success,#16a34a)" },
+                    { label: "Rejected", value: ss.rejectedWithdrawals,  color: undefined },
+                    { label: "Stuck ⚠", value: ss.stuckWithdrawals,    color: ss.stuckWithdrawals > 0 ? "var(--danger,#dc2626)" : undefined },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                      <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{label}</p>
+                      <p style={{ fontWeight: 700, fontSize: "1.2rem", color: color ?? undefined }}>{value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 10, marginTop: 10 }}>
+                  {[
+                    { label: "Settled RLUSD_TEST", value: ss.totalSettledRLUSD },
+                    { label: "Settled EURQ_TEST",  value: ss.totalSettledEURQ  },
+                    { label: "Fees RLUSD_TEST",    value: ss.totalFeesRLUSD    },
+                    { label: "Fees EURQ_TEST",     value: ss.totalFeesEURQ     },
+                    { label: "Network Fees (XRP)", value: ss.totalNetworkFeesXRP },
+                  ].map(({ label, value }) => (
+                    <div key={label} style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                      <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{label}</p>
+                      <p style={{ fontWeight: 700, fontSize: "1.05rem" }}>{value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {ss.lastSettlementAt && (
+                  <p className="muted" style={{ marginTop: 8, fontSize: "0.72rem" }}>
+                    Last settlement: {new Date(ss.lastSettlementAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+
+              {/* ── Section C: Queue Health ──────────────────────────────── */}
+              {xrplData.queueMetrics && (() => {
+                const qm = xrplData.queueMetrics;
+                return (
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+                      <p className="muted" style={{ fontSize: "0.72rem", margin: 0 }}>Queue Health</p>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        {queueRunMsg && (
+                          <span style={{ fontSize: "0.75rem", color: queueRunMsg.includes("ailed") ? "var(--danger,#dc2626)" : "var(--success,#16a34a)" }}>
+                            {queueRunMsg}
+                          </span>
+                        )}
+                        <button
+                          onClick={() => void triggerQueue()}
+                          disabled={queueRunning}
+                          style={{ fontSize: "0.78rem", padding: "4px 12px", background: "var(--accent)", color: "#fff", minWidth: 130 }}
+                        >
+                          {queueRunning ? "Triggering…" : "▶ Run Queue Now"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10 }}>
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Worker Status</p>
+                        <p style={{ fontWeight: 700, fontSize: "0.95rem", color: qm.workerEnabled ? "var(--success,#16a34a)" : "var(--danger,#dc2626)" }}>
+                          {qm.workerEnabled ? "✓ Running" : "✗ Stopped"}
+                        </p>
+                      </div>
+
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Pending Queue</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.2rem", color: qm.queued > 0 ? "var(--warning,#d97706)" : undefined }}>
+                          {qm.queued}
+                        </p>
+                      </div>
+
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Processing</p>
+                        <p style={{ fontWeight: 700, fontSize: "1.2rem", color: qm.processing > 0 ? "var(--accent)" : undefined }}>
+                          {qm.processing}
+                        </p>
+                      </div>
+
+                      <div style={{ background: "var(--bg)", borderRadius: 8, padding: "10px 14px" }}>
+                        <p className="muted" style={{ fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Next Scan</p>
+                        <p style={{ fontWeight: 600, fontSize: "0.85rem" }}>
+                          {qm.nextRunAt ? new Date(qm.nextRunAt).toLocaleTimeString() : "—"}
+                        </p>
+                        {qm.lastRunAt && (
+                          <p className="muted" style={{ fontSize: "0.63rem", marginTop: 2 }}>
+                            Last: {new Date(qm.lastRunAt).toLocaleTimeString()}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 16, marginTop: 10, flexWrap: "wrap" }}>
+                      <p className="muted" style={{ fontSize: "0.70rem", margin: 0 }}>
+                        {qm.lastSuccessfulQueueRun
+                          ? `✓ Last successful run: ${new Date(qm.lastSuccessfulQueueRun).toLocaleString()}`
+                          : "✓ Last successful run: —"}
+                      </p>
+                      <p className="muted" style={{ fontSize: "0.70rem", margin: 0 }}>
+                        {qm.lastFailedQueueRun
+                          ? `✗ Last failure: ${new Date(qm.lastFailedQueueRun).toLocaleString()}`
+                          : "✗ Last failure: —"}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* ── Recent settlements table ─────────────────────────────── */}
+              <div style={{ marginTop: 16 }}>
+                <p className="muted" style={{ fontSize: "0.72rem", marginBottom: 8 }}>Recent Settlements (last 20 via xrpl_testnet)</p>
+                {rs.length === 0 ? (
+                  <p className="muted" style={{ fontSize: "0.82rem" }}>No settlements yet.</p>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.78rem" }}>
+                      <thead>
+                        <tr style={{ borderBottom: "2px solid var(--border)" }}>
+                          {["Date","User","Asset","Gross","Net","Fee","Status","TX / Explorer"].map((h) => (
+                            <th key={h} className="muted" style={{ textAlign: "left", padding: "5px 8px", fontWeight: 600, fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rs.map((s) => (
+                          <tr key={s.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                            <td style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>
+                              {s.xrplConfirmedAt
+                                ? new Date(s.xrplConfirmedAt).toLocaleDateString()
+                                : "—"}
+                            </td>
+                            <td style={{ padding: "6px 8px", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={s.userEmail}>
+                              {s.userEmail}
+                            </td>
+                            <td style={{ padding: "6px 8px", fontWeight: 600 }}>{s.currencyCode}</td>
+                            <td style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>{s.grossAmount}</td>
+                            <td style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>{s.netAmount}</td>
+                            <td style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>{s.feeAmount}</td>
+                            <td style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>
+                              <span style={{
+                                padding: "2px 8px", borderRadius: 20, fontSize: "0.70rem", fontWeight: 600,
+                                background: s.status === "settled"  ? "rgba(22,163,74,0.12)"
+                                          : s.status === "approved" ? "rgba(217,119,6,0.12)"
+                                          : "rgba(107,114,128,0.12)",
+                                color: s.status === "settled"  ? "var(--success,#16a34a)"
+                                     : s.status === "approved" ? "var(--warning,#d97706)"
+                                     : "var(--muted)",
+                              }}>{s.status}</span>
+                            </td>
+                            <td style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>
+                              {s.xrplTxHash ? (
+                                s.explorerUrl ? (
+                                  <a href={s.explorerUrl} target="_blank" rel="noreferrer" style={{ fontSize: "0.75rem" }}>
+                                    {`${s.xrplTxHash.slice(0, 8)}…`} ↗
+                                  </a>
+                                ) : (
+                                  <code style={{ fontSize: "0.72rem" }}>{s.xrplTxHash.slice(0, 12)}…</code>
+                                )
+                              ) : (
+                                <span className="muted">—</span>
+                              )}
+                              {s.xrplNetworkFeeXrp && (
+                                <span className="muted" style={{ fontSize: "0.67rem", display: "block" }}>
+                                  Fee: {s.xrplNetworkFeeXrp} XRP
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </>
+          );
+        })()}
       </div>
 
       {msg && <p className={msg.includes("✅") ? "muted" : "error"} style={{ marginBottom: 12 }}>{msg}</p>}
@@ -3912,6 +6423,67 @@ function AdminTreasuryPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 // AppShell — sidebar layout wrapper for all authenticated pages
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DemoBanner — testnet environment notice (dismissible per browser session)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DemoBanner() {
+  const [dismissed, setDismissed] = useState(() => {
+    try { return sessionStorage.getItem("lp_demo_banner_dismissed") === "1"; } catch { return false; }
+  });
+
+  if (dismissed) return null;
+
+  return (
+    <div
+      style={{
+        background: "linear-gradient(135deg, rgba(99,102,241,0.12) 0%, rgba(16,185,129,0.09) 100%)",
+        border: "1px solid rgba(99,102,241,0.25)",
+        borderRadius: 10,
+        padding: "10px 16px",
+        margin: "0 0 16px 0",
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 12,
+        fontSize: "0.82rem",
+        lineHeight: 1.5,
+      }}
+    >
+      <span style={{ fontSize: "1rem", flexShrink: 0 }}>🚧</span>
+      <div style={{ flex: 1 }}>
+        <strong style={{ display: "block", marginBottom: 2, fontSize: "0.85rem" }}>
+          LumixPay Demo Environment
+        </strong>
+        <span className="muted">
+          This version operates on <strong>XRPL Testnet</strong> using{" "}
+          <strong>RLUSD_TEST</strong> and <strong>EURQ_TEST</strong>.{" "}
+          No real funds are involved.
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          try { sessionStorage.setItem("lp_demo_banner_dismissed", "1"); } catch { /* ignore */ }
+          setDismissed(true);
+        }}
+        style={{
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          color: "var(--muted)",
+          fontSize: "1rem",
+          padding: "0 4px",
+          lineHeight: 1,
+          flexShrink: 0,
+        }}
+        aria-label="Dismiss demo banner"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
 
 function AppShell({ children }: { children: React.ReactNode }) {
   const { user, logout, token } = useAuth();
@@ -4013,7 +6585,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
           <NavItem to="/history"    icon="📋" label="History" />
 
           <div className="sb-section-label">COMMUNICATION</div>
-          <NavItem to="/notifications" icon="🔔" label="Inbox" badge={unreadCount} />
+          <NavItem to="/notifications" icon="🔔" label="Notifications" badge={unreadCount} />
           <NavItem to="/contacts"      icon="👥" label="Contacts" />
 
           <div className="sb-section-label">PAYMENTS</div>
@@ -4155,7 +6727,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
             <img src="/logo.png" alt="LumixPay" style={{ height: 28, objectFit: "contain" }} />
           </Link>
         </div>
-        <main className="shell-main">{children}</main>
+        <main className="shell-main">
+          <div style={{ maxWidth: 960, margin: "0 auto", padding: "0 4px" }}>
+            <DemoBanner />
+          </div>
+          {children}
+        </main>
       </div>
     </div>
   );

@@ -66,6 +66,14 @@ export interface SettlementResult {
    * ────────────────────────────────────────────────────────────────────────────
    */
   networkFeeCostXrp: string | null;
+
+  /**
+   * Human-readable error description for admin display.
+   * Populated on status='failed' or 'timeout' by XRPL-aware providers.
+   * Null for mock provider and on success.
+   * Never contains secrets or private key material.
+   */
+  friendlyError?: string;
 }
 
 /**
